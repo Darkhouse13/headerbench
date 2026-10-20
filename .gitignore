@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-e2e/
+build/
+coverage/
+test-results/
+playwright-report/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+*.crx
+/store/

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Headerbench</title>
+  <rect x="12" y="12" width="104" height="104" rx="24" fill="#ffffff" stroke="#dadce0" stroke-width="2"/>
+  <rect x="30" y="38" width="68" height="20" rx="6" fill="#1a73e8"/>
+  <rect x="30" y="70" width="44" height="20" rx="6" fill="#aecbfa"/>
+  <circle cx="88" cy="80" r="10" fill="#1a73e8"/>
+</svg>

@@ -1,0 +1,85 @@
+[
+  {
+    "version": 2,
+    "title": "Staging API",
+    "shortTitle": "S",
+    "backgroundColor": "#e37400",
+    "textColor": "#ffffff",
+    "appendMode": false,
+    "sendEmptyHeader": false,
+    "headers": [
+      {
+        "enabled": true,
+        "name": "Authorization",
+        "value": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InN0Zy0yMDI2In0.eyJzdWIiOiJ1c3JfOGsyIn0.Qm9ndXM",
+        "comment": "staging service account"
+      },
+      { "enabled": true, "name": "X-Api-Version", "value": "2", "comment": "" },
+      { "enabled": true, "name": "X-Debug", "value": "1", "comment": "verbose errors" },
+      {
+        "enabled": true,
+        "name": "X-Request-Id",
+        "value": "function({url}) { return crypto.randomUUID(); }",
+        "comment": "per-request id"
+      }
+    ],
+    "respHeaders": [
+      {
+        "enabled": true,
+        "name": "Access-Control-Allow-Origin",
+        "value": "http://localhost:5173",
+        "comment": ""
+      }
+    ],
+    "urlFilters": [
+      { "enabled": true, "urlRegex": ".*://api\\.staging\\.example\\.com/.*", "comment": "" }
+    ],
+    "excludeUrlFilters": [{ "enabled": true, "urlRegex": ".*/health$", "comment": "" }]
+  },
+  {
+    "version": 2,
+    "title": "Local dev",
+    "shortTitle": "L",
+    "backgroundColor": "#188038",
+    "textColor": "#ffffff",
+    "headers": [
+      {
+        "enabled": true,
+        "name": "X-Feature-Flags",
+        "value": "new-checkout,beta-search",
+        "comment": ""
+      },
+      { "enabled": true, "name": "X-Tenant", "value": "northwind", "comment": "" },
+      { "enabled": true, "name": "Cookie", "value": "session=dev-7f3a9c", "comment": "" },
+      { "enabled": true, "name": "X-Forwarded-For", "value": "203.0.113.24", "comment": "geo test" }
+    ],
+    "urlFilters": [{ "enabled": true, "urlRegex": ".*://localhost(:\\d+)?/.*", "comment": "" }],
+    "urlReplacements": [
+      {
+        "enabled": true,
+        "name": "^https://cdn\\.example\\.com/assets/app\\.(.*)\\.js$",
+        "value": "http://localhost:5173/assets/app.$1.js",
+        "comment": "serve the local bundle"
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "title": "QA iPhone",
+    "shortTitle": "Q",
+    "backgroundColor": "#9334e6",
+    "textColor": "#ffffff",
+    "headers": [
+      {
+        "enabled": true,
+        "name": "User-Agent",
+        "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1",
+        "comment": ""
+      },
+      { "enabled": true, "name": "Accept-Language", "value": "fr-FR,fr;q=0.9", "comment": "" },
+      { "enabled": true, "name": "X-Client-Platform", "value": "ios", "comment": "" },
+      { "enabled": true, "name": "X-App-Version", "value": "5.12.0", "comment": "" },
+      { "enabled": true, "name": "Save-Data", "value": "on", "comment": "" }
+    ]
+  }
+]

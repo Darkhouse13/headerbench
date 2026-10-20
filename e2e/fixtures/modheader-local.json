@@ -1,0 +1,46 @@
+[
+  {
+    "version": 2,
+    "title": "Local API",
+    "shortTitle": "L",
+    "backgroundColor": "#1a73e8",
+    "textColor": "#ffffff",
+    "appendMode": false,
+    "sendEmptyHeader": false,
+    "headers": [
+      { "enabled": true, "name": "X-Imported", "value": "modheader", "comment": "" },
+      {
+        "enabled": true,
+        "name": "Authorization",
+        "value": "Bearer eyJhbGciOiJIUzI1NiJ9.e2e.sig",
+        "comment": "local token"
+      },
+      {
+        "enabled": true,
+        "name": "X-Request-Time",
+        "value": "function({url}) { return String(Date.now()); }",
+        "comment": "dynamic value"
+      },
+      { "enabled": true, "name": "Accept-Language", "value": "", "comment": "strip it" }
+    ],
+    "respHeaders": [
+      { "enabled": true, "name": "X-Imported-Response", "value": "yes", "comment": "" }
+    ],
+    "urlFilters": [
+      { "enabled": true, "urlRegex": "^http://127\\.0\\.0\\.1:\\d+/echo/.*", "comment": "" }
+    ]
+  },
+  {
+    "version": 2,
+    "title": "iPhone Safari",
+    "shortTitle": "i",
+    "headers": [
+      {
+        "enabled": true,
+        "name": "User-Agent",
+        "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1",
+        "comment": ""
+      }
+    ]
+  }
+]

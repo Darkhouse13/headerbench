@@ -1,0 +1,9 @@
+{
+  "name": "Feature flags",
+  "sections": {
+    "request": {
+      "enabled": true,
+      "rules": [{ "id": "r1", "enabled": true, "name": "X-Feature-Flag", "value": "new-checkout" }]
+    }
+  }
+}

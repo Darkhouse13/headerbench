@@ -1,0 +1,39 @@
+{
+  "name": "headerbench",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "workspaces": [
+    "packages/core",
+    "extension",
+    "e2e"
+  ],
+  "scripts": {
+    "build:core": "npm run build -w @headerbench/core",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "npm run build:core && npm run typecheck --workspaces --if-present",
+    "test": "npm run build:core && npm run test --workspaces --if-present",
+    "coverage": "npm run coverage --workspaces --if-present",
+    "e2e": "npm run e2e --workspaces --if-present",
+    "package": "npm run build:core && npm run package --workspaces --if-present",
+    "check:manifest": "node scripts/check-manifest.mjs --throwaway-key",
+    "check:release": "node scripts/check-manifest.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.5",
+    "@vitest/coverage-v8": "^5.0.3",
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^5.0.3"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://headerbench.com"
+}

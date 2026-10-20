@@ -1,0 +1,23 @@
+[
+  {
+    "title": "Legacy",
+    "hideComment": true,
+    "headers": [{ "enabled": true, "name": "X-Legacy", "value": "yes", "comment": "" }],
+    "filters": [
+      {
+        "type": "urls",
+        "enabled": true,
+        "urlRegex": "https?://legacy\\.example\\.org/.*",
+        "comment": ""
+      },
+      { "type": "excludeUrls", "enabled": true, "urlRegex": ".*\\.png", "comment": "" },
+      {
+        "type": "types",
+        "enabled": true,
+        "resourceType": ["xmlhttprequest", "sub_frame"],
+        "comment": ""
+      },
+      { "type": "cookies", "enabled": true, "comment": "" }
+    ]
+  }
+]

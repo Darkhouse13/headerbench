@@ -1,0 +1,94 @@
+{
+  "modheader": 2,
+  "exportedAt": "2026-09-14T08:12:44.501Z",
+  "theme": "dark",
+  "profiles": [
+    {
+      "id": "p_1",
+      "name": "QA tenant",
+      "enabled": true,
+      "sections": {
+        "request": {
+          "enabled": true,
+          "rules": [
+            { "id": "r1", "enabled": true, "name": "X-Tenant", "value": "qa-17" },
+            {
+              "id": "r2",
+              "enabled": true,
+              "name": "Accept-Language",
+              "value": "de-DE",
+              "operation": "append"
+            },
+            { "id": "r3", "enabled": true, "name": "X-Remove-Me", "value": "", "op": "remove" },
+            { "id": "r4", "enabled": true, "name": "Bad Header", "value": "x" }
+          ]
+        },
+        "response": {
+          "enabled": false,
+          "rules": [
+            { "id": "r5", "enabled": true, "name": "X-Frame-Options", "value": "SAMEORIGIN" }
+          ]
+        },
+        "cookies": {
+          "enabled": true,
+          "rules": [
+            {
+              "id": "c1",
+              "enabled": true,
+              "name": "session",
+              "value": "abc",
+              "domain": "example.com"
+            }
+          ]
+        },
+        "redirects": {
+          "enabled": true,
+          "rules": [
+            {
+              "id": "d1",
+              "enabled": true,
+              "from": "https://qa.example.com/config.json",
+              "to": "http://localhost:8080/config.json"
+            },
+            {
+              "id": "d2",
+              "enabled": true,
+              "name": "^https://qa\\.example\\.com/img/(.*)",
+              "value": "https://cdn.example.com/$1"
+            }
+          ]
+        },
+        "csp": {
+          "enabled": true,
+          "rules": [{ "id": "s1", "enabled": true, "name": "script-src", "value": "'self'" }]
+        }
+      },
+      "filters": [
+        {
+          "id": "f1",
+          "enabled": true,
+          "mode": "include",
+          "type": "url",
+          "value": "||qa.example.com^"
+        },
+        { "id": "f2", "enabled": true, "mode": "exclude", "type": "regex", "value": "/logout$" },
+        { "id": "f3", "enabled": true, "mode": "include", "type": "tab", "value": "12" },
+        {
+          "id": "f4",
+          "enabled": true,
+          "mode": "exclude",
+          "type": "resource",
+          "value": "image, font"
+        },
+        {
+          "id": "f5",
+          "enabled": true,
+          "mode": "include",
+          "type": "method",
+          "value": "GET,POST,TRACE"
+        },
+        { "id": "f6", "enabled": true, "mode": "include", "type": "cookie", "value": "x" }
+      ]
+    }
+  ]
+}

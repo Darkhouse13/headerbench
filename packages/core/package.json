@@ -1,0 +1,30 @@
+{
+  "name": "@headerbench/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headerbench core: data model, DNR compiler, URL tester, importers and licence verification. Platform-free.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0"
+  }
+}

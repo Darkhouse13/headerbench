@@ -1,0 +1,127 @@
+/* Design tokens. Chrome's neutral palette with one accent (#1a73e8). Dark mode follows the
+   system unless Settings overrides it via html[data-theme]. */
+
+:root {
+  color-scheme: light;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, 'Helvetica Neue', sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', 'Liberation Mono', monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs: 13px;
+  --fs-md: 15px;
+  --fs-lg: 20px;
+  --fs-xl: 24px;
+  --lh: 20px;
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-pill: 999px;
+
+  --page: #f8f9fa;
+  --surface: #ffffff;
+  --surface-2: #f1f3f4;
+  --hover: rgb(60 64 67 / 0.08);
+  --active: rgb(60 64 67 / 0.12);
+  --border: #dadce0;
+  --divider: #e8eaed;
+  --text: #202124;
+  --text-2: #5f6368;
+  --icon: #5f6368;
+  --accent: #1a73e8;
+  --accent-hover: #1765cc;
+  --accent-bg: #e8f0fe;
+  --accent-text: #1967d2;
+  --on-accent: #ffffff;
+  --danger: #c5221f;
+  --danger-bg: #fce8e6;
+  --warning: #b05a00;
+  --warning-bg: #fef7e0;
+  --success: #137333;
+  --success-bg: #e6f4ea;
+  --focus: #1a73e8;
+  --shadow-1: 0 1px 2px rgb(60 64 67 / 0.3), 0 1px 3px 1px rgb(60 64 67 / 0.15);
+  --shadow-2: 0 2px 6px 2px rgb(60 64 67 / 0.15), 0 1px 2px rgb(60 64 67 / 0.3);
+  --scrim: rgb(32 33 36 / 0.6);
+
+  --env-local: #188038;
+  --env-dev: #1a73e8;
+  --env-staging: #b06000;
+  --env-prod: #c5221f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --page: #202124;
+    --surface: #292a2d;
+    --surface-2: #35363a;
+    --hover: rgb(232 234 237 / 0.08);
+    --active: rgb(232 234 237 / 0.12);
+    --border: #5f6368;
+    --divider: #3c4043;
+    --text: #e8eaed;
+    --text-2: #9aa0a6;
+    --icon: #9aa0a6;
+    --accent: #8ab4f8;
+    --accent-hover: #aecbfa;
+    --accent-bg: rgb(138 180 248 / 0.16);
+    --accent-text: #8ab4f8;
+    --on-accent: #202124;
+    --danger: #f28b82;
+    --danger-bg: rgb(242 139 130 / 0.14);
+    --warning: #fdd663;
+    --warning-bg: rgb(253 214 99 / 0.12);
+    --success: #81c995;
+    --success-bg: rgb(129 201 149 / 0.14);
+    --focus: #8ab4f8;
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
+    --shadow-2: 0 2px 6px 2px rgb(0 0 0 / 0.3), 0 1px 2px rgb(0 0 0 / 0.4);
+    --scrim: rgb(0 0 0 / 0.6);
+    --env-local: #81c995;
+    --env-dev: #8ab4f8;
+    --env-staging: #fcad70;
+    --env-prod: #f28b82;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #202124;
+  --surface: #292a2d;
+  --surface-2: #35363a;
+  --hover: rgb(232 234 237 / 0.08);
+  --active: rgb(232 234 237 / 0.12);
+  --border: #5f6368;
+  --divider: #3c4043;
+  --text: #e8eaed;
+  --text-2: #9aa0a6;
+  --icon: #9aa0a6;
+  --accent: #8ab4f8;
+  --accent-hover: #aecbfa;
+  --accent-bg: rgb(138 180 248 / 0.16);
+  --accent-text: #8ab4f8;
+  --on-accent: #202124;
+  --danger: #f28b82;
+  --danger-bg: rgb(242 139 130 / 0.14);
+  --warning: #fdd663;
+  --warning-bg: rgb(253 214 99 / 0.12);
+  --success: #81c995;
+  --success-bg: rgb(129 201 149 / 0.14);
+  --focus: #8ab4f8;
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
+  --shadow-2: 0 2px 6px 2px rgb(0 0 0 / 0.3), 0 1px 2px rgb(0 0 0 / 0.4);
+  --scrim: rgb(0 0 0 / 0.6);
+  --env-local: #81c995;
+  --env-dev: #8ab4f8;
+  --env-staging: #fcad70;
+  --env-prod: #f28b82;
+}

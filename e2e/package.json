@@ -1,0 +1,16 @@
+{
+  "name": "@headerbench/e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright end-to-end tests that load the unpacked Headerbench extension against a local echo server, plus the store screenshots.",
+  "type": "module",
+  "scripts": {
+    "e2e": "npm run build -w @headerbench/core && npm run build:e2e -w @headerbench/extension && playwright test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@headerbench/core": "*",
+    "@playwright/test": "1.56.1",
+    "@types/chrome": "^0.3.5"
+  }
+}

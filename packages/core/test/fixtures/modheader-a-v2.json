@@ -1,0 +1,82 @@
+[
+  {
+    "version": 2,
+    "title": "Staging API",
+    "shortTitle": "S",
+    "hideComment": true,
+    "backgroundColor": "#C5221F",
+    "textColor": "#ffffff",
+    "appendMode": false,
+    "sendEmptyHeader": false,
+    "lockedProfile": true,
+    "headers": [
+      { "enabled": true, "name": "X-Api-Key", "value": "stg_4f9a2c", "comment": "staging key" },
+      {
+        "enabled": true,
+        "name": "Authorization",
+        "value": "Bearer eyJhbGciOiJIUzI1NiJ9.e30.sig",
+        "comment": ""
+      },
+      { "enabled": false, "name": "X-Debug", "value": "1", "comment": "turn on when needed" },
+      { "enabled": true, "name": "Referer", "value": "", "comment": "strip referer" },
+      { "enabled": true, "name": "", "value": "orphan", "comment": "" }
+    ],
+    "respHeaders": [
+      { "enabled": true, "name": "Access-Control-Allow-Origin", "value": "*", "comment": "" }
+    ],
+    "urlFilters": [
+      { "enabled": true, "urlRegex": ".*://api\\.staging\\.example\\.com/.*", "comment": "" }
+    ],
+    "excludeUrlFilters": [{ "enabled": true, "urlRegex": ".*/health$", "comment": "" }],
+    "resourceFilters": [
+      { "enabled": true, "resourceType": ["xmlhttprequest", "main_frame"], "comment": "" }
+    ],
+    "urlReplacements": [
+      {
+        "enabled": true,
+        "name": "^https://cdn\\.example\\.com/app\\.(.*)\\.js$",
+        "value": "http://localhost:3000/app.$1.js",
+        "comment": ""
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "title": "Mobile UA",
+    "shortTitle": "M",
+    "appendMode": "comma",
+    "sendEmptyHeader": true,
+    "headers": [
+      {
+        "enabled": true,
+        "name": "User-Agent",
+        "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X)",
+        "comment": ""
+      },
+      { "enabled": true, "name": "X-Empty", "value": "", "comment": "sent empty" },
+      {
+        "enabled": true,
+        "name": "X-Request-Time",
+        "value": "function({url, oldValue}) {\n  return String(Date.now());\n}",
+        "comment": "dynamic"
+      }
+    ],
+    "respHeaders": [],
+    "urlFilters": [
+      {
+        "enabled": true,
+        "urlRegex": "^https://(?!admin\\.)[a-z]+\\.example\\.com/",
+        "comment": "lookahead"
+      }
+    ],
+    "excludeUrlFilters": [],
+    "resourceFilters": [
+      { "enabled": true, "resourceType": ["xmlhttprequest", "beacon"], "comment": "" },
+      { "enabled": false, "resourceType": ["image"], "comment": "" }
+    ],
+    "urlReplacements": [
+      { "enabled": true, "name": "(a)\\1", "value": "b", "comment": "backreference" },
+      { "enabled": true, "name": "", "value": "ignored", "comment": "" }
+    ]
+  }
+]

@@ -1,0 +1,418 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`compile: excludes > turns pattern excludes into allow rules at base + 9 with a scope warning 1`] = `
+[
+  {
+    "action": {
+      "requestHeaders": [
+        {
+          "header": "x-a",
+          "operation": "set",
+          "value": "1",
+        },
+      ],
+      "type": "modifyHeaders",
+    },
+    "condition": {
+      "requestMethods": [
+        "get",
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+    },
+    "id": 1,
+    "priority": 10,
+  },
+  {
+    "action": {
+      "type": "allow",
+    },
+    "condition": {
+      "requestMethods": [
+        "get",
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+      "urlFilter": "/health",
+    },
+    "id": 2,
+    "priority": 19,
+  },
+  {
+    "action": {
+      "type": "allow",
+    },
+    "condition": {
+      "regexFilter": "\\.png$",
+      "requestMethods": [
+        "get",
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+    },
+    "id": 3,
+    "priority": 19,
+  },
+]
+`;
+
+exports[`compile: rule kinds > compiles blocks and redirects with their own pattern scope 1`] = `
+[
+  {
+    "action": {
+      "type": "block",
+    },
+    "condition": {
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+      "urlFilter": "||ads.example.com^",
+    },
+    "id": 1,
+    "priority": 12,
+  },
+  {
+    "action": {
+      "type": "block",
+    },
+    "condition": {
+      "regexFilter": "^https://track\\.",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+    },
+    "id": 2,
+    "priority": 12,
+  },
+  {
+    "action": {
+      "redirect": {
+        "url": "http://localhost:3000/app.js",
+      },
+      "type": "redirect",
+    },
+    "condition": {
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+      "urlFilter": "|https://cdn.example.com/app.js|",
+    },
+    "id": 3,
+    "priority": 13,
+  },
+  {
+    "action": {
+      "redirect": {
+        "url": "https://new.example.com/api/",
+      },
+      "type": "redirect",
+    },
+    "condition": {
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+      "urlFilter": "||old.example.com/api/",
+    },
+    "id": 4,
+    "priority": 13,
+  },
+  {
+    "action": {
+      "redirect": {
+        "regexSubstitution": "http://localhost:3000/\\1",
+      },
+      "type": "redirect",
+    },
+    "condition": {
+      "regexFilter": "^https://prod\\.example\\.com/(.*)$",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+    },
+    "id": 5,
+    "priority": 13,
+  },
+]
+`;
+
+exports[`compile: rule kinds > compiles mocks to data: URL redirects without frame types 1`] = `
+[
+  {
+    "action": {
+      "redirect": {
+        "url": "data:application/json;charset=utf-8;base64,eyJ1c2VycyI6W119",
+      },
+      "type": "redirect",
+    },
+    "condition": {
+      "resourceTypes": [
+        "xmlhttprequest",
+        "script",
+        "stylesheet",
+        "image",
+        "font",
+        "media",
+        "other",
+      ],
+      "urlFilter": "||api.example.com/users",
+    },
+    "id": 1,
+    "priority": 14,
+  },
+]
+`;
+
+exports[`compile: rule kinds > compiles request and response header ops into one modifyHeaders rule for all URLs 1`] = `
+[
+  {
+    "action": {
+      "requestHeaders": [
+        {
+          "header": "x-api-key",
+          "operation": "set",
+          "value": "abc123",
+        },
+        {
+          "header": "cookie",
+          "operation": "append",
+          "value": "a=1",
+        },
+        {
+          "header": "referer",
+          "operation": "remove",
+        },
+      ],
+      "responseHeaders": [
+        {
+          "header": "Access-Control-Allow-Origin",
+          "operation": "set",
+          "value": "*",
+        },
+        {
+          "header": "Content-Security-Policy",
+          "operation": "remove",
+        },
+      ],
+      "type": "modifyHeaders",
+    },
+    "condition": {
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "stylesheet",
+        "script",
+        "image",
+        "font",
+        "object",
+        "xmlhttprequest",
+        "ping",
+        "csp_report",
+        "media",
+        "websocket",
+        "webtransport",
+        "webbundle",
+        "other",
+      ],
+    },
+    "id": 1,
+    "priority": 10,
+  },
+]
+`;
+
+exports[`compile: rule kinds > emits one rule per include filter, with resource types and methods 1`] = `
+[
+  {
+    "action": {
+      "requestHeaders": [
+        {
+          "header": "x-debug",
+          "operation": "set",
+          "value": "1",
+        },
+      ],
+      "type": "modifyHeaders",
+    },
+    "condition": {
+      "requestDomains": [
+        "api.example.com",
+      ],
+      "requestMethods": [
+        "post",
+        "get",
+      ],
+      "resourceTypes": [
+        "xmlhttprequest",
+        "main_frame",
+      ],
+    },
+    "id": 1,
+    "priority": 10,
+  },
+  {
+    "action": {
+      "requestHeaders": [
+        {
+          "header": "x-debug",
+          "operation": "set",
+          "value": "1",
+        },
+      ],
+      "type": "modifyHeaders",
+    },
+    "condition": {
+      "requestMethods": [
+        "post",
+        "get",
+      ],
+      "resourceTypes": [
+        "xmlhttprequest",
+        "main_frame",
+      ],
+      "urlFilter": "||cdn.example.com^",
+    },
+    "id": 2,
+    "priority": 10,
+  },
+  {
+    "action": {
+      "requestHeaders": [
+        {
+          "header": "x-debug",
+          "operation": "set",
+          "value": "1",
+        },
+      ],
+      "type": "modifyHeaders",
+    },
+    "condition": {
+      "regexFilter": "^https://[a-z]+\\.test/",
+      "requestMethods": [
+        "post",
+        "get",
+      ],
+      "resourceTypes": [
+        "xmlhttprequest",
+        "main_frame",
+      ],
+    },
+    "id": 3,
+    "priority": 10,
+  },
+]
+`;
