@@ -10,6 +10,7 @@ import { DEV_LICENSE_PRIVATE_KEY } from '../../packages/core/test/fixtures/dev-l
 import type { Env } from '../src/sw/background';
 import { createBackground } from '../src/sw/background';
 import type { Reply, Request, RequestType, ResponseMap } from '../src/messages';
+import type { FakeArea } from './chrome-fake';
 import { createChromeFake } from './chrome-fake';
 
 export const NOW = Date.UTC(2026, 9, 12, 10, 0, 0);
@@ -49,11 +50,14 @@ export function licenseKey(payload: Partial<LicensePayload> = {}): string {
   );
 }
 
-/** A background wired to a fresh fake chrome, with a controllable clock and fetch. */
+/**
+ * A background wired to a fresh fake chrome, with a controllable clock and fetch. Pass another
+ * device's `api.storage.sync` as `sync` to model two devices on one Chrome account.
+ */
 export function setup(
-  options: { now?: number; fetch?: typeof fetch; revokedLicenses?: string[] } = {},
+  options: { now?: number; fetch?: typeof fetch; revokedLicenses?: string[]; sync?: FakeArea } = {},
 ) {
-  const fakeChrome = createChromeFake();
+  const fakeChrome = createChromeFake(options.sync ? { sync: options.sync } : {});
   const clock = { now: options.now ?? NOW };
   const env: Env = {
     chrome: fakeChrome.chrome,
@@ -85,3 +89,4 @@ export function setup(
   }
   return { bg, env, clock, call, save, ...fakeChrome };
 }
+export type Setup = ReturnType<typeof setup>;

@@ -35,6 +35,28 @@ export function isAppendableRequestHeader(name: string): boolean {
   return APPENDABLE_REQUEST_HEADERS.includes(name.trim().toLowerCase());
 }
 
+/**
+ * Request headers the browser manages itself. Setting or appending them makes requests fail
+ * (Chrome 151: `transfer-encoding` and `expect` break fetches) or behave unpredictably.
+ */
+export const FRAGILE_REQUEST_HEADERS: readonly string[] = [
+  'connection',
+  'content-length',
+  'expect',
+  'host',
+  'keep-alive',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+];
+
+/** The HEADER_BREAKS_REQUESTS message for a request set/append of `name`, or null. */
+export function fragileRequestHeaderWarning(name: string): string | null {
+  if (!FRAGILE_REQUEST_HEADERS.includes(name.trim().toLowerCase())) return null;
+  return `Requests may fail when ${name.trim()} is changed. The browser manages this header itself.`;
+}
+
 /** RFC 7230 `token`. */
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
@@ -58,65 +80,6 @@ export function checkVariableName(name: string): string | null {
     return 'Variable names start with a letter or _ and contain only letters, digits and _.';
   }
   return null;
-}
-
-/**
- * Rejects JS regex features that Chrome's RE2 engine does not support:
- * lookaround, backreferences in the pattern, atomic groups and possessive quantifiers.
- * Returns `null` if compatible, else the reason.
- */
-export function re2Incompatibility(pattern: string): string | null {
-  let inClass = false;
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch === '\\') {
-      const next = pattern[i + 1] ?? '';
-      if (!inClass && /[1-9]/.test(next))
-        return 'Backreferences (\\1) are not supported in Chrome rules.';
-      if (!inClass && next === 'k' && pattern[i + 2] === '<') {
-        return 'Named backreferences (\\k<name>) are not supported in Chrome rules.';
-      }
-      i++;
-      continue;
-    }
-    if (inClass) {
-      if (ch === ']') inClass = false;
-      continue;
-    }
-    if (ch === '[') {
-      inClass = true;
-      // A leading ] or ^] is a literal inside the class.
-      if (pattern[i + 1] === '^') i++;
-      if (pattern[i + 1] === ']') i++;
-      continue;
-    }
-    if (ch === '(' && pattern[i + 1] === '?') {
-      const rest = pattern.slice(i + 2, i + 4);
-      if (rest.startsWith('=') || rest.startsWith('!') || rest === '<=' || rest === '<!') {
-        return 'Lookahead and lookbehind ((?=, (?!, (?<=, (?<!) are not supported in Chrome rules.';
-      }
-      if (rest.startsWith('>')) return 'Atomic groups ((?>...)) are not supported in Chrome rules.';
-    }
-    if ((ch === '+' || ch === '*' || ch === '?' || ch === '}') && pattern[i + 1] === '+') {
-      return 'Possessive quantifiers (++, *+, ?+) are not supported in Chrome rules.';
-    }
-  }
-  return null;
-}
-
-export function re2Compatible(pattern: string): boolean {
-  return re2Incompatibility(pattern) === null;
-}
-
-/** The regex must compile in JavaScript and be RE2-compatible. */
-export function checkRegex(pattern: string): string | null {
-  if (pattern.length === 0) return 'Pattern is empty.';
-  try {
-    new RegExp(pattern);
-  } catch (err) {
-    return `Invalid regular expression: ${(err as Error).message}`;
-  }
-  return re2Incompatibility(pattern);
 }
 
 /** DNR urlFilter: ASCII only, must not start with `||*`, `|` only at either end. */

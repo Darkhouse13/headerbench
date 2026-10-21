@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "e2e": "npm run build -w @headerbench/core && npm run build:e2e -w @headerbench/extension && playwright test",
+    "screenshots": "npm run build -w @headerbench/core && npm run build:e2e -w @headerbench/extension && HB_SCREENSHOTS=1 playwright test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

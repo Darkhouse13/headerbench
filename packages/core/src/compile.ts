@@ -22,15 +22,24 @@ import type {
   RedirectRule,
   ResourceType,
   State,
+  UrlFilter,
   Variable,
 } from './model.js';
-import { RESOURCE_TYPES } from './model.js';
-import { checkHeaderValue, isAppendableRequestHeader, normalizeDomain } from './validate.js';
+import { FRAME_TYPES, RESOURCE_TYPES } from './model.js';
+import { toRegexSubstitution } from './re2.js';
+import {
+  checkHeaderValue,
+  fragileRequestHeaderWarning,
+  isAppendableRequestHeader,
+  normalizeDomain,
+} from './validate.js';
 import { substituteVariables, usesVariables } from './variables.js';
 
 export type WarningCode =
   | 'EXCLUDE_ALLOW_SCOPE'
   | 'APPEND_NOT_ALLOWED'
+  | 'APPEND_OVERLAP'
+  | 'HEADER_BREAKS_REQUESTS'
   | 'VARIABLE_UNRESOLVED'
   | 'PRO_PAUSED'
   | 'INVALID_ITEM'
@@ -103,11 +112,6 @@ export function activeActivations(state: State, now: number): Activation[] {
   return state.settings.activations.filter(
     (a) => ids.has(a.profileId) && (a.pauseAt === null || a.pauseAt > now),
   );
-}
-
-/** `$1` → `\1` for DNR regexSubstitution; a literal backslash is escaped. */
-export function toRegexSubstitution(target: string): string {
-  return target.replace(/\\/g, '\\\\').replace(/\$(\d)/g, '\\$1');
 }
 
 const TEXTUAL_TYPE = /^(text\/|application\/(json|javascript|xml|[\w.+-]+\+(json|xml))\b)/i;
@@ -250,8 +254,8 @@ class Compiler {
         continue;
       }
       const key = mod.name.toLowerCase();
-      // Chrome rejects a mixed-case request-header `append` (and with it the whole rule), so request
-      // ops always use the lowercase name; HTTP header names are case-insensitive.
+      // Request ops use the lowercase name. Older Chrome rejected a mixed-case request `append`
+      // (Chrome 151 accepts it); HTTP header names are case-insensitive, so this is harmless.
       const header = direction === 'request' ? key : mod.name;
       let op = mod.op;
       if (op === 'append' && direction === 'request' && !isAppendableRequestHeader(mod.name)) {
@@ -263,6 +267,9 @@ class Compiler {
         );
         op = 'set';
       }
+      const fragile =
+        direction === 'request' && op !== 'remove' ? fragileRequestHeaderWarning(mod.name) : null;
+      if (fragile) this.warn('HEADER_BREAKS_REQUESTS', profile.id, [mod.id], fragile);
       if (op !== 'append') {
         if (replaced.has(key)) {
           this.warn(
@@ -333,7 +340,17 @@ class Compiler {
     };
     // Aligned with the ops: request ops first, then response ops.
     const itemIds = [...requestIds, ...responseIds];
-    const conditions = includes.length > 0 ? includes.map(filterCondition) : [{}];
+    const conditions = includeConditions(includes);
+    const ops = [...request, ...response];
+    const appendIds = itemIds.filter((_, i) => ops[i]?.operation === 'append');
+    if (conditions.length > 1 && appendIds.length > 0) {
+      this.warn(
+        'APPEND_OVERLAP',
+        profile.id,
+        appendIds,
+        "If two of this profile's filters match the same request, the value is appended twice.",
+      );
+    }
     for (const condition of conditions) {
       this.add(
         activation.tabId,
@@ -365,7 +382,7 @@ class Compiler {
         'EXCLUDE_ALLOW_SCOPE',
         profile.id,
         [exclude.id],
-        'Exclude patterns also pause lower-priority profiles on matching URLs. Use a domain exclude to affect only this profile.',
+        "On matching URLs this exclude also skips this profile's blocks, redirects and mocks, and every lower-priority profile. A domain exclude affects only this profile's headers.",
       );
     }
   }
@@ -388,25 +405,36 @@ class Compiler {
       this.warn('INVALID_ITEM', profile.id, [redirect.id], badTarget, 'error');
       return;
     }
-    const condition: DnrRuleCondition =
-      redirect.kind === 'url'
-        ? { urlFilter: `|${exactUrlFilterTarget(redirect.from)}|` }
-        : patternCondition(redirect.kind, redirect.from);
-    this.add(
-      activation.tabId,
-      { profileId: profile.id, activationIndex: index, kind: 'redirect', itemIds: [redirect.id] },
-      {
-        priority: base + PRIORITY_OFFSET.redirect,
-        action: {
-          type: 'redirect',
-          redirect:
-            redirect.kind === 'regex'
-              ? { regexSubstitution: toRegexSubstitution(to) }
-              : { url: to },
+    const conditions: DnrRuleCondition[] = [];
+    if (redirect.kind === 'url') {
+      const exact = exactUrlFilterTarget(redirect.from);
+      conditions.push({ urlFilter: `|${exact}|`, resourceTypes: [...RESOURCE_TYPES] });
+      // Chrome matches page and frame loads with their #fragment, so `|url|` alone misses
+      // https://x/old#top. Subresource URLs never carry one.
+      conditions.push({ urlFilter: `|${exact}#`, resourceTypes: [...FRAME_TYPES] });
+    } else {
+      conditions.push({
+        ...patternCondition(redirect.kind, redirect.from),
+        resourceTypes: [...RESOURCE_TYPES],
+      });
+    }
+    for (const condition of conditions) {
+      this.add(
+        activation.tabId,
+        { profileId: profile.id, activationIndex: index, kind: 'redirect', itemIds: [redirect.id] },
+        {
+          priority: base + PRIORITY_OFFSET.redirect,
+          action: {
+            type: 'redirect',
+            redirect:
+              redirect.kind === 'regex'
+                ? { regexSubstitution: toRegexSubstitution(to) }
+                : { url: to },
+          },
+          condition,
         },
-        condition: { ...condition, resourceTypes: [...RESOURCE_TYPES] },
-      },
-    );
+      );
+    }
   }
 
   private mockRule(
@@ -471,6 +499,19 @@ function filterCondition(filter: { kind: string; value: string }): DnrRuleCondit
   if (filter.kind === 'domain')
     return { requestDomains: [normalizeDomain(filter.value) as string] };
   return patternCondition(filter.kind as 'urlFilter' | 'regex', filter.value);
+}
+
+/**
+ * One condition for all domain includes (so overlapping domains can't match a request twice and
+ * double an `append`), plus one per urlFilter/regex include. No includes means all URLs.
+ */
+function includeConditions(includes: readonly UrlFilter[]): DnrRuleCondition[] {
+  if (includes.length === 0) return [{}];
+  const domains = includes
+    .filter((f) => f.kind === 'domain')
+    .map((f) => normalizeDomain(f.value) as string);
+  const patterns = includes.filter((f) => f.kind !== 'domain').map(filterCondition);
+  return domains.length > 0 ? [{ requestDomains: unique(domains) }, ...patterns] : patterns;
 }
 
 function countStats(dynamic: DnrRule[], session: DnrRule[]): CompileStats {

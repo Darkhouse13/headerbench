@@ -146,13 +146,17 @@ export function isValidState(raw: unknown): raw is State {
   return stateProblem(raw) === null;
 }
 
-/** Drops activations of missing profiles and duplicate activations of one profile. */
+/**
+ * Drops activations of missing profiles and duplicates: a profile keeps at most one global
+ * activation and one activation per tab (the first one listed wins).
+ */
 export function normalizeState(state: State): State {
   const ids = new Set(state.profiles.map((p) => p.id));
   const seen = new Set<string>();
   const activations = state.settings.activations.filter((a) => {
-    if (!ids.has(a.profileId) || seen.has(a.profileId)) return false;
-    seen.add(a.profileId);
+    const key = `${a.profileId}|${a.tabId ?? 'all'}`;
+    if (!ids.has(a.profileId) || seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
   return { ...state, settings: { ...state.settings, activations } };

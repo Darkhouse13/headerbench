@@ -1,12 +1,12 @@
 import type { MockRule, Profile, ProStatus } from '@headerbench/core';
-import { MOCK_MAX_BYTES, newId, utf8Encode } from '@headerbench/core';
+import { MOCK_CSP_NOTE, MOCK_MAX_BYTES, newId, utf8Encode } from '@headerbench/core';
 import { FileJson, Plus, Trash2 } from 'lucide-preact';
 import { Banner, Button, EmptyState, IconButton, Issue, Switch } from '../components/controls';
 import { useStore } from '../context';
 import { formatBytes } from '../format';
 import { proGate } from '../pro';
-import type { IssueMap } from './issues';
-import { shown, useFocusRow } from './table';
+import type { IssueMap, RowIssue } from './issues';
+import { memoRow, shown, useFocusRow, useStable } from './table';
 import { useRegexCheck } from './useRegexCheck';
 
 const CONTENT_TYPES = [
@@ -27,18 +27,16 @@ interface Props {
   onGetPro: () => void;
 }
 
-function MockCard({
-  mock,
-  issues,
-  onChange,
-  onDelete,
-}: {
+interface MockCardProps {
   mock: MockRule;
-  issues: IssueMap;
-  onChange: (patch: Partial<MockRule>) => void;
-  onDelete: () => void;
-}) {
+  issues: readonly RowIssue[] | undefined;
+  setMock: (id: string, patch: Partial<MockRule>) => void;
+  remove: (id: string) => void;
+}
+
+const MockCard = memoRow(function MockCard({ mock, issues, setMock, remove }: MockCardProps) {
   const { platform } = useStore();
+  const onChange = (patch: Partial<MockRule>): void => setMock(mock.id, patch);
   const regexProblem = useRegexCheck(platform, mock.pattern, mock.kind === 'regex');
   const bytes = utf8Encode(mock.body).length;
   const id = mock.id;
@@ -48,7 +46,7 @@ function MockCard({
         <Switch
           small
           checked={mock.enabled}
-          label={`${mock.enabled ? 'Turn off' : 'Turn on'} mock ${mock.pattern}`}
+          label={mock.pattern.trim() || 'Unnamed mock'}
           onChange={(enabled) => onChange({ enabled })}
         />
         <select
@@ -68,7 +66,12 @@ function MockCard({
           value={mock.pattern}
           onInput={(e) => onChange({ pattern: e.currentTarget.value })}
         />
-        <IconButton icon={Trash2} small label={`Delete mock ${mock.pattern}`} onClick={onDelete} />
+        <IconButton
+          icon={Trash2}
+          small
+          label={`Delete mock ${mock.pattern}`}
+          onClick={() => remove(mock.id)}
+        />
       </div>
       <div class="mock__grid">
         <label class="field">
@@ -109,14 +112,14 @@ function MockCard({
         />
       </div>
       {regexProblem && <Issue tone="error">{regexProblem}</Issue>}
-      {shown(issues.get(id), mock.pattern === '').map((issue, i) => (
+      {shown(issues, mock.pattern === '').map((issue, i) => (
         <Issue key={i} tone={issue.tone}>
           {issue.message}
         </Issue>
       ))}
     </div>
   );
-}
+});
 
 export function MocksTab({ profile, issues, pro, onChange, onGetPro }: Props) {
   const { platform } = useStore();
@@ -136,8 +139,12 @@ export function MocksTab({ profile, issues, pro, onChange, onGetPro }: Props) {
     onChange({ mocks: [...mocks, row] });
     focusRow(row.id);
   };
-  const setMock = (id: string, patch: Partial<MockRule>): void =>
-    onChange({ mocks: mocks.map((m) => (m.id === id ? { ...m, ...patch } : m)) });
+  const setMock = useStable((id: string, patch: Partial<MockRule>): void =>
+    onChange({ mocks: mocks.map((m) => (m.id === id ? { ...m, ...patch } : m)) }),
+  );
+  const remove = useStable((id: string): void =>
+    onChange({ mocks: mocks.filter((x) => x.id !== id) }),
+  );
 
   return (
     <div class="panel">
@@ -180,9 +187,9 @@ export function MocksTab({ profile, issues, pro, onChange, onGetPro }: Props) {
               <MockCard
                 key={m.id}
                 mock={m}
-                issues={issues}
-                onChange={(patch) => setMock(m.id, patch)}
-                onDelete={() => onChange({ mocks: mocks.filter((x) => x.id !== m.id) })}
+                issues={issues.get(m.id)}
+                setMock={setMock}
+                remove={remove}
               />
             ))}
           </div>
@@ -198,6 +205,7 @@ export function MocksTab({ profile, issues, pro, onChange, onGetPro }: Props) {
         be set. Mocks apply to fetch, XHR, scripts, styles, images, fonts and media, not to whole
         pages.
       </p>
+      <p class="panel__help">{MOCK_CSP_NOTE}</p>
     </div>
   );
 }

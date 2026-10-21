@@ -5,6 +5,7 @@ import { reorderProfiles } from '../../activations';
 import type { ActivationControls } from '../activation';
 import { EnvChip, IconButton, ProfileMark, Switch } from '../components/controls';
 import { useStore } from '../context';
+import { profileName } from '../format';
 import { profileHash } from './router';
 
 interface Props {
@@ -81,13 +82,13 @@ export function Sidebar({ selectedId, controls, onCreate }: Props) {
         >
           <GripVertical class="icon side-item__grip" size={16} aria-hidden="true" />
           <ProfileMark profile={profile} small />
-          <span class="grow truncate">{profile.name || 'Untitled profile'}</span>
+          <span class="grow truncate">{profileName(profile)}</span>
           <EnvChip env={profile.env} />
         </a>
         <Switch
           small
           checked={onIds.has(profile.id)}
-          label={onIds.has(profile.id) ? `Turn off ${profile.name}` : `Turn on ${profile.name}`}
+          label={profileName(profile)}
           onChange={(next) => void (next ? controls.turnOn(profile) : controls.turnOff(profile))}
         />
       </li>

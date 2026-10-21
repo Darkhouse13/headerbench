@@ -16,24 +16,56 @@ function schemeOrigins(scheme: string, host: string): string[] {
   return scheme === '*' ? [`https://${host}/*`, `http://${host}/*`] : [`${scheme}://${host}/*`];
 }
 
-function domainOrigins(domain: string): string[] {
-  return [...schemeOrigins('*', domain), ...schemeOrigins('*', `*.${domain}`)];
+/** An IPv4 or bracketed IPv6 literal: it has no subdomains. */
+function isIpLiteral(host: string): boolean {
+  return host.startsWith('[') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
 }
 
-/** Origins for an absolute URL prefix such as `https://api.example.com/v1`. */
+/** A host and, unless it is an IP literal, its subdomains. */
+function domainOrigins(host: string): string[] {
+  const own = schemeOrigins('*', host);
+  return isIpLiteral(host) ? own : [...own, ...schemeOrigins('*', `*.${host}`)];
+}
+
+/** A host as written after `scheme://` or `||`: `[IPv6]`, `*`, `*.domain`, a domain or IPv4. */
+const HOST = String.raw`(\[[0-9a-f:.]+\]|\*(?:\.[^/:?#*^|]+)?|[^/:?#*^|\[]+)(?=[/:?#^|]|$)`;
+
+/** The host-permission form of a parsed host, or null if it is not a valid host. */
+function hostPattern(raw: string): string | null {
+  if (raw === '*') return '*';
+  if (raw.startsWith('*.')) {
+    const domain = normalizeDomain(raw.slice(2));
+    return domain ? `*.${domain}` : null;
+  }
+  if (raw.startsWith('[')) {
+    try {
+      return new URL(`http://${raw}/`).hostname;
+    } catch {
+      return null;
+    }
+  }
+  return normalizeDomain(raw);
+}
+
+/** Origins for an absolute URL prefix such as `https://api.example.com:8443/v1` or `https://*.example.com/`. */
 function urlPrefixOrigins(text: string): string[] | null {
-  const match = /^(https?|\*):\/\/([^/:?#*^|]+)(?=[/:?#^|]|$)/i.exec(text);
+  const match = new RegExp(`^(https?|\\*)://${HOST}`, 'i').exec(text);
   if (!match) return null;
-  const host = normalizeDomain(match[2] as string);
+  const host = hostPattern(match[2] as string);
   if (!host) return null;
   return schemeOrigins((match[1] as string).toLowerCase(), host);
 }
 
-/** `||host^…` → host and subdomains; `|https://host/…` or `https://host/…` → that origin; else null (= all). */
+/**
+ * `||host^…` or `||host:3000/` → host and subdomains; `|https://host:port/…` or
+ * `https://host/…` → that scheme and host (any port); else null (= all).
+ */
 export function urlFilterOrigins(filter: string): string[] | null {
   if (filter.startsWith('||')) {
-    const match = /^\|\|([^/:?#*^|]+)(?=[/:?#^|]|$)/.exec(filter);
-    const host = match ? normalizeDomain(match[1] as string) : null;
+    const match = new RegExp(`^\\|\\|${HOST}`, 'i').exec(filter);
+    const raw = match?.[1];
+    if (raw === undefined || raw.startsWith('*')) return null;
+    const host = hostPattern(raw);
     return host ? domainOrigins(host) : null;
   }
   return urlPrefixOrigins(filter.startsWith('|') ? filter.slice(1) : filter);
@@ -96,9 +128,10 @@ export function pageOrigin(url: string): string | null {
 }
 
 /**
- * Whether a host-permission match pattern (`<scheme>://<host>/<path>`, `*` scheme = http and
- * https, `*.` host prefix = domain and subdomains, `<all_urls>`) grants access to `url`.
- * Ports and paths are ignored, as Chrome does for host permissions with `/*` paths.
+ * Whether a host-permission match pattern (`<scheme>://<host>[:<port>]/<path>`, `*` scheme = http
+ * and https, `*.` host prefix = domain and subdomains, `[IPv6]` hosts, `<all_urls>`) grants
+ * access to `url`. A pattern without a port (or with `:*`) covers every port; paths are ignored,
+ * as Chrome does for host permissions.
  */
 export function patternGrants(pattern: string, url: string): boolean {
   let parsed: URL;
@@ -110,9 +143,14 @@ export function patternGrants(pattern: string, url: string): boolean {
   const scheme = parsed.protocol.slice(0, -1);
   if (scheme !== 'http' && scheme !== 'https') return false;
   if (pattern === '<all_urls>') return true;
-  const match = /^(\*|https?):\/\/([^/]+)\//.exec(pattern);
+  const match = /^(\*|https?):\/\/(\[[^\]/]*\]|[^/:]*)(?::(\d+|\*))?\//.exec(pattern);
   if (!match) return false;
   if (match[1] !== '*' && match[1] !== scheme) return false;
+  const port = match[3];
+  if (port !== undefined && port !== '*') {
+    const effective = parsed.port || (scheme === 'https' ? '443' : '80');
+    if (Number(port) !== Number(effective)) return false;
+  }
   const host = (match[2] as string).toLowerCase();
   const target = parsed.hostname.toLowerCase();
   if (host === '*') return true;

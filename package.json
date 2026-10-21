@@ -19,6 +19,7 @@
     "test": "npm run build:core && npm run test --workspaces --if-present",
     "coverage": "npm run coverage --workspaces --if-present",
     "e2e": "npm run e2e --workspaces --if-present",
+    "screenshots": "npm run screenshots -w @headerbench/e2e",
     "package": "npm run build:core && npm run package --workspaces --if-present",
     "check:manifest": "node scripts/check-manifest.mjs --throwaway-key",
     "check:release": "node scripts/check-manifest.mjs"

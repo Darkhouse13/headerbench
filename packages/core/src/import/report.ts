@@ -50,6 +50,12 @@ export class ReportBuilder {
     this.lines.push({ level: 'info', profile, message });
   }
 
+  /** Like `info`, but skips a line already reported for the same profile. */
+  infoOnce(profile: string | null, message: string): void {
+    const seen = this.lines.some((l) => l.profile === profile && l.message === message);
+    if (!seen) this.info(profile, message);
+  }
+
   warn(profile: string | null, message: string): void {
     this.lines.push({ level: 'warning', profile, message });
   }

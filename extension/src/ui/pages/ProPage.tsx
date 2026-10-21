@@ -35,7 +35,8 @@ export function ProPage() {
   const { platform } = store;
   const now = platform.now();
   const licensed = pro.pro && pro.source === 'license';
-  const canTrial = pro.trialEndsAt === null && pro.source !== 'license';
+  // Anyone who has a licence key, even an expired one, has had their trial.
+  const canTrial = pro.plan === null && pro.trialEndsAt === null && pro.source === null;
   const canUpgrade = licensed && pro.plan === 'pro_yearly';
 
   return (
@@ -53,7 +54,7 @@ export function ProPage() {
         title={proSummary(pro, now)}
         actions={
           (canTrial && (
-            <Button small variant="primary" onClick={() => void store.call({ type: 'startTrial' })}>
+            <Button small variant="primary" onClick={() => void store.run({ type: 'startTrial' })}>
               Start {TRIAL_DAYS}-day free trial
             </Button>
           )) ||

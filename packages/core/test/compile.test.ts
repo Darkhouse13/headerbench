@@ -1,12 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import {
-  RESOURCE_TYPES,
-  base64Decode,
-  compile,
-  mockDataUrl,
-  toRegexSubstitution,
-  utf8Decode,
-} from '../src/index.js';
+import { RESOURCE_TYPES, base64Decode, compile, mockDataUrl, utf8Decode } from '../src/index.js';
 import type { CompileResult, State, WarningCode } from '../src/index.js';
 import {
   FREE,
@@ -90,9 +83,13 @@ describe('compile: rule kinds', () => {
     const result = compile(stateWith([p]), PRO);
     expect(result.dynamic).toMatchSnapshot();
     expect(result.dynamic.every((r) => r.condition.requestDomains === undefined)).toBe(true);
-    expect(result.dynamic.map((r) => r.priority)).toEqual([12, 12, 13, 13, 13]);
+    expect(result.dynamic.map((r) => r.priority)).toEqual([12, 12, 13, 13, 13, 13]);
     expect(result.dynamic[2]?.condition.urlFilter).toBe('|https://cdn.example.com/app.js|');
-    expect(result.dynamic[4]?.action.redirect).toEqual({
+    expect(result.dynamic[3]?.condition).toEqual({
+      urlFilter: '|https://cdn.example.com/app.js#',
+      resourceTypes: ['main_frame', 'sub_frame'],
+    });
+    expect(result.dynamic[5]?.action.redirect).toEqual({
       regexSubstitution: 'http://localhost:3000/\\1',
     });
   });
@@ -108,9 +105,24 @@ describe('compile: rule kinds', () => {
     const filters = compile(stateWith([p]), FREE).dynamic.map((r) => r.condition.urlFilter);
     expect(filters).toEqual([
       '|https://cdn.example.com/|',
+      '|https://cdn.example.com/#',
       '|http://a.test/x?y=1|',
+      '|http://a.test/x?y=1#',
       '|https://b.test/%C3%BCn%C3%AF%20code|',
+      '|https://b.test/%C3%BCn%C3%AF%20code#',
     ]);
+  });
+
+  it('adds a #fragment rule for page and frame loads, which Chrome matches with the fragment', () => {
+    const p = profile('P', {
+      redirects: [redirect('url', 'https://x.test/old', 'https://x.test/new')],
+    });
+    const result = compile(stateWith([p]), FREE);
+    expect(result.dynamic.map((r) => [r.condition.urlFilter, r.condition.resourceTypes])).toEqual([
+      ['|https://x.test/old|', [...RESOURCE_TYPES]],
+      ['|https://x.test/old#', ['main_frame', 'sub_frame']],
+    ]);
+    expect(result.sources.map((s) => s.itemIds)).toEqual([['r1'], ['r1']]);
   });
 
   it('sends lowercase request header names, so Chrome accepts a mixed-case append', () => {
@@ -193,6 +205,7 @@ describe('compile: priority', () => {
       [3, 22, 'block'],
       [4, 10, 'modifyHeaders'],
       [5, 13, 'redirect'],
+      [6, 13, 'redirect'],
     ]);
     expect(result.dynamic[0]?.action.requestHeaders).toEqual([
       { header: 'x-env', operation: 'set', value: 'a' },
@@ -212,7 +225,7 @@ describe('compile: priority', () => {
     state.settings.activations[0] = { ...state.settings.activations[0]!, pauseAt: NOW - 1 };
     state.settings.activations[1] = { ...state.settings.activations[1]!, pauseAt: NOW + 60_000 };
     const result = compile(state, FREE);
-    expect(result.dynamic.map((r) => r.priority)).toEqual([20, 22, 10, 13]);
+    expect(result.dynamic.map((r) => r.priority)).toEqual([20, 22, 10, 13, 13]);
   });
 });
 
@@ -227,9 +240,11 @@ describe('compile: excludes', () => {
       ],
     });
     const result = compile(stateWith([p]), FREE);
-    expect(result.dynamic).toHaveLength(2);
-    for (const rule of result.dynamic)
-      expect(rule.condition.excludedRequestDomains).toEqual(['login.example.com']);
+    expect(result.dynamic).toHaveLength(1);
+    expect(result.dynamic[0]?.condition).toMatchObject({
+      requestDomains: ['example.com', 'other.com'],
+      excludedRequestDomains: ['login.example.com'],
+    });
     expect(result.warnings).toEqual([]);
   });
 
@@ -245,6 +260,9 @@ describe('compile: excludes', () => {
       19, 19,
     ]);
     expect(codes(result)).toEqual(['EXCLUDE_ALLOW_SCOPE', 'EXCLUDE_ALLOW_SCOPE']);
+    expect(result.warnings[0]?.message).toBe(
+      "On matching URLs this exclude also skips this profile's blocks, redirects and mocks, and every lower-priority profile. A domain exclude affects only this profile's headers.",
+    );
   });
 
   it('ignores disabled filters', () => {
@@ -305,7 +323,10 @@ describe('compile: Pro gating', () => {
 
   it('pauses regex redirects and mocks without Pro and says which', () => {
     const result = compile(proProfile(), FREE);
-    expect(result.dynamic.map((r) => r.action.redirect?.url)).toEqual(['https://b.test/x']);
+    expect(result.dynamic.map((r) => r.action.redirect?.url)).toEqual([
+      'https://b.test/x',
+      'https://b.test/x',
+    ]);
     expect(result.warnings).toEqual([
       {
         code: 'PRO_PAUSED',
@@ -319,7 +340,7 @@ describe('compile: Pro gating', () => {
 
   it('compiles them with Pro', () => {
     const result = compile(proProfile(), PRO);
-    expect(result.dynamic).toHaveLength(3);
+    expect(result.dynamic).toHaveLength(4);
     expect(result.warnings).toEqual([]);
   });
 });
@@ -352,7 +373,7 @@ describe('compile: variables', () => {
       { header: 'x-missing', operation: 'set', value: '{{nope}}' },
     ]);
     expect(result.dynamic[1]?.action.redirect?.url).toBe('http://localhost:5173/main.js');
-    const dataUrl = result.dynamic[2]?.action.redirect?.url ?? '';
+    const dataUrl = result.dynamic[3]?.action.redirect?.url ?? '';
     expect(utf8Decode(base64Decode(dataUrl.split(',')[1]!))).toBe('{"user":"zoë"}');
     expect(result.warnings.map((w) => [w.code, w.itemIds, w.message])).toEqual([
       ['VARIABLE_UNRESOLVED', ['h2'], 'Unknown variable {{nope}}. The text is sent as written.'],
@@ -514,7 +535,7 @@ describe('compile: validation', () => {
 describe('compile: rule budget', () => {
   it('refuses to compile more than 4,500 unsafe rules', () => {
     const filters = Array.from({ length: 4501 }, (_, i) =>
-      filter('domain', `host${i}.example.com`),
+      filter('urlFilter', `||host${i}.example.com^`),
     );
     const result = compile(
       stateWith([profile('Huge', { requestHeaders: [header('X-A', '1')], filters })]),
@@ -537,7 +558,7 @@ describe('compile: rule budget', () => {
 
   it('accepts exactly 4,500', () => {
     const filters = Array.from({ length: 4500 }, (_, i) =>
-      filter('domain', `host${i}.example.com`),
+      filter('urlFilter', `||host${i}.example.com^`),
     );
     const result = compile(
       stateWith([profile('Big', { requestHeaders: [header('X-A', '1')], filters })]),
@@ -549,11 +570,120 @@ describe('compile: rule budget', () => {
   });
 });
 
-describe('toRegexSubstitution', () => {
-  it('converts $n to \\n and escapes backslashes', () => {
-    expect(toRegexSubstitution('http://localhost:3000/$1?x=$2')).toBe(
-      'http://localhost:3000/\\1?x=\\2',
-    );
-    expect(toRegexSubstitution('a\\b')).toBe('a\\\\b');
+describe('compile: domain includes', () => {
+  it('merges every domain include into one condition, so overlaps cannot double an append', () => {
+    const p = profile('P', {
+      requestHeaders: [header('Accept-Language', 'fr', 'append')],
+      filters: [
+        filter('domain', 'example.com'),
+        filter('domain', 'api.example.com'),
+        filter('domain', 'Example.com'),
+      ],
+    });
+    const result = compile(stateWith([p]), FREE);
+    expect(result.dynamic).toHaveLength(1);
+    expect(result.dynamic[0]?.condition.requestDomains).toEqual(['example.com', 'api.example.com']);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns that an append can apply twice when several pattern filters remain', () => {
+    const p = profile('P', {
+      requestHeaders: [header('X-Set', '1'), header('Accept-Language', 'fr', 'append')],
+      responseHeaders: [header('X-Resp', 'a', 'append')],
+      filters: [filter('domain', 'example.com'), filter('urlFilter', '||api.example.com/v1/')],
+    });
+    const result = compile(stateWith([p]), FREE);
+    expect(result.dynamic.map((r) => r.condition.requestDomains ?? r.condition.urlFilter)).toEqual([
+      ['example.com'],
+      '||api.example.com/v1/',
+    ]);
+    expect(result.warnings).toEqual([
+      {
+        code: 'APPEND_OVERLAP',
+        severity: 'warning',
+        message:
+          "If two of this profile's filters match the same request, the value is appended twice.",
+        profileId: p.id,
+        itemIds: ['h2', 'h3'],
+      },
+    ]);
+  });
+
+  it('does not warn about overlap without an append', () => {
+    const p = profile('P', {
+      requestHeaders: [header('X-Set', '1')],
+      filters: [filter('urlFilter', '||a.test^'), filter('regex', '^https://b\\.test/')],
+    });
+    expect(codes(compile(stateWith([p]), FREE))).toEqual([]);
+  });
+});
+
+describe('compile: request headers the browser manages', () => {
+  it.each([
+    'Transfer-Encoding',
+    'expect',
+    'Content-Length',
+    'Connection',
+    'Upgrade',
+    'Keep-Alive',
+    'TE',
+    'Trailer',
+    'Host',
+  ])('warns that changing %s may break requests', (name) => {
+    const p = profile('P', { requestHeaders: [header(name, 'x')] });
+    const result = compile(stateWith([p]), FREE);
+    expect(result.warnings).toEqual([
+      {
+        code: 'HEADER_BREAKS_REQUESTS',
+        severity: 'warning',
+        message: `Requests may fail when ${name} is changed. The browser manages this header itself.`,
+        profileId: p.id,
+        itemIds: ['h1'],
+      },
+    ]);
+    expect(result.dynamic).toHaveLength(1);
+  });
+
+  it('also warns on append, but not on remove or on response headers', () => {
+    const p = profile('P', {
+      requestHeaders: [
+        header('Transfer-Encoding', 'gzip', 'append'),
+        header('Expect', '', 'remove'),
+      ],
+      responseHeaders: [header('Content-Length', '1')],
+    });
+    expect(compile(stateWith([p]), FREE).warnings.map((w) => [w.code, w.itemIds])).toEqual([
+      ['HEADER_BREAKS_REQUESTS', ['h1']],
+    ]);
+  });
+});
+
+describe('compile: regex redirect substitutions', () => {
+  it('skips a redirect whose $N names a missing group', () => {
+    const p = profile('P', {
+      redirects: [redirect('regex', '^https://prod\\.test/(.*)$', 'http://localhost/$1/$2')],
+    });
+    const result = compile(stateWith([p]), PRO);
+    expect(result.dynamic).toEqual([]);
+    expect(result.warnings).toEqual([
+      {
+        code: 'INVALID_ITEM',
+        severity: 'error',
+        message: '$2 in the target refers to group 2, but the pattern has only 1 capture group.',
+        profileId: p.id,
+        itemIds: ['r1'],
+      },
+    ]);
+  });
+
+  it('re-checks after variables are substituted', () => {
+    const p = profile('P', {
+      redirects: [redirect('regex', '^https://prod\\.test/(.*)$', '{{base}}/$1')],
+    });
+    const state = stateWith([p]);
+    state.settings.variables = [{ id: 'v', name: 'base', value: 'http://localhost/$3' }];
+    const result = compile(state, PRO);
+    expect(result.dynamic).toEqual([]);
+    expect(result.warnings[0]?.message).toMatch(/\$3 in the target refers to group 3/);
   });
 });

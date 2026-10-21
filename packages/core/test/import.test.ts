@@ -1,7 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { compile, exportJson, importAny, regexToDomain, summarizeImport } from '../src/index.js';
+import {
+  compile,
+  exportJson,
+  importAny,
+  originsFor,
+  regexToFilter,
+  summarizeImport,
+} from '../src/index.js';
 import type { ImportResult, State } from '../src/index.js';
+import { checkFilter } from '../src/items.js';
 import { header, mock, profile, redirect, stateWith } from './helpers.js';
 
 const NOW = 1_760_000_000_000;
@@ -159,6 +167,47 @@ describe('ModHeader appendMode', () => {
     for (const mode of [false, null, '', 'false', undefined]) {
       expect(ops(formatA(mode)), String(mode)).toEqual(['set']);
     }
+  });
+
+  it('imports an unknown appendMode as set and says so once per profile', () => {
+    const result = importAny(JSON.stringify(formatA('semicolon')), NOW);
+    expect(result.profiles[0]!.requestHeaders.map((h) => h.op)).toEqual(['set']);
+    expect(result.profiles[0]!.responseHeaders.map((h) => h.op)).toEqual(['set']);
+    expect(result.report.lines.filter((l) => l.message.includes('appendMode'))).toEqual([
+      {
+        level: 'info',
+        profile: 'P',
+        message:
+          'appendMode "semicolon" is not one Headerbench knows, so those headers replace the value instead of appending to it.',
+      },
+    ]);
+    const known = importAny(JSON.stringify(formatA(false)), NOW);
+    expect(known.report.lines.filter((l) => l.message.includes('appendMode'))).toEqual([]);
+  });
+
+  it('reports an unknown Format B appendMode on a profile or rule', () => {
+    const result = importAny(
+      JSON.stringify({
+        name: 'B',
+        appendMode: 2,
+        sections: {
+          request: {
+            rules: [
+              { enabled: true, name: 'X-A', value: '1' },
+              { enabled: true, name: 'X-B', value: '1', appendMode: 'space' },
+            ],
+          },
+        },
+      }),
+      NOW,
+    );
+    expect(result.profiles[0]!.requestHeaders.map((h) => h.op)).toEqual(['set', 'set']);
+    expect(
+      result.report.lines.filter((l) => l.message.includes('appendMode')).map((l) => l.message),
+    ).toEqual([
+      'appendMode 2 is not one Headerbench knows, so those headers replace the value instead of appending to it.',
+      'appendMode "space" is not one Headerbench knows, so those headers replace the value instead of appending to it.',
+    ]);
   });
 
   it('honours appendMode on a Format B profile or rule, unless the rule names its op', () => {
@@ -355,17 +404,76 @@ describe('junk input', () => {
   });
 });
 
-describe('regexToDomain', () => {
+describe('regexToFilter', () => {
   it.each([
     ['.*://api\\.example\\.com/.*', 'api.example.com'],
-    ['^https://api\\.example\\.com/', 'api.example.com'],
     ['https?://api.example.com.*', 'api.example.com'],
     ['(https?)://.*\\.example\\.com/.*$', 'example.com'],
-    ['http:\\/\\/localhost\\.test:8080\\/.*', 'localhost.test'],
     ['.*://api\\.example\\.com', 'api.example.com'],
     ['.*://localhost/.*', 'localhost'],
-  ])('%s → %s', (regex, domain) => {
-    expect(regexToDomain(regex)).toBe(domain);
+  ])('%s → domain %s', (regex, domain) => {
+    expect(regexToFilter(regex)).toMatchObject({ kind: 'domain', value: domain });
+  });
+
+  it.each([
+    ['^https?://localhost:3000/.*', '||localhost:3000/'],
+    ['.*://api\\.example\\.com:8443/.*', '||api.example.com:8443/'],
+    ['.*://.*\\.example\\.com:8443.*', '||example.com:8443/'],
+    ['^https://api\\.example\\.com/', '|https://api.example.com/'],
+    ['http:\\/\\/localhost\\.test:8080\\/.*', '|http://localhost.test:8080/'],
+    ['^http://127\\.0\\.0\\.1:5173/.*$', '|http://127.0.0.1:5173/'],
+  ])('keeps the port or the single scheme: %s → urlFilter %s', (regex, value) => {
+    expect(regexToFilter(regex)).toMatchObject({ kind: 'urlFilter', value });
+  });
+
+  it.each([
+    ['^https://x\\.com/$', '|https://x.com/|'],
+    ['^http://localhost:3000/$', '|http://localhost:3000/|'],
+    ['https:\\/\\/api\\.example\\.com\\/$', '|https://api.example.com/|'],
+  ])('keeps a $-anchored root address exact: %s → urlFilter %s', (regex, value) => {
+    const filter = regexToFilter(regex);
+    expect(filter).toMatchObject({ kind: 'urlFilter', value });
+    expect(checkFilter({ id: 'f', enabled: true, kind: 'urlFilter', value, exclude: false })).toBe(
+      null,
+    );
+  });
+
+  it('imports a root-address regex as an exact filter that asks only for that host', () => {
+    const result = importAny(
+      JSON.stringify([
+        {
+          version: 2,
+          title: 'Home',
+          headers: [{ enabled: true, name: 'X-Debug', value: '1' }],
+          urlFilters: [{ enabled: true, urlRegex: '^https://x\\.com/$' }],
+        },
+      ]),
+      NOW,
+    );
+    const p = result.profiles[0]!;
+    expect(p.filters).toMatchObject([{ kind: 'urlFilter', value: '|https://x.com/|' }]);
+    expect(lines(result)).toContain(
+      'info|Home|Filter ^https://x\\.com/$ became the URL filter |https://x.com/| (only that exact address), so Headerbench asks for access to that site instead of every site.',
+    );
+    expect(originsFor(p)).toEqual(['https://x.com/*']);
+    const result2 = compile(stateWith([p]), { pro: false, now: NOW });
+    expect(result2.dynamic[0]?.condition.urlFilter).toBe('|https://x.com/|');
+  });
+
+  it.each([
+    // `$` after the host alone matches no URL (Chrome always has a path), so nothing to widen.
+    '^https://x\\.com$',
+    // Any scheme or subdomains: `||x.com/|` would also match other hosts' root addresses.
+    '.*://x\\.com/$',
+    '^https?://x\\.com/$',
+    '^https://(.*\\.)?x\\.com/$',
+  ])('keeps the $-anchored %s as a regex', (regex) => {
+    expect(regexToFilter(regex)).toBeNull();
+  });
+
+  it('still widens a $-anchored "any path" regex, and ignores an escaped $', () => {
+    expect(regexToFilter('^https://x\\.com/.*$')).toMatchObject({ value: '|https://x.com/' });
+    expect(regexToFilter('^https://x\\.com/\\$')).toBeNull();
   });
 
   it.each([
@@ -373,7 +481,52 @@ describe('regexToDomain', () => {
     '.*://api\\.example\\.com/v1/.*',
     '^https://[a-z]+\\.example\\.com/',
     'ftp://x\\.test/',
+    // One scheme plus subdomains has no urlFilter form that is not wider than the regex.
+    '^https://.*\\.example\\.com/.*',
   ])('keeps %s as a regex', (regex) => {
-    expect(regexToDomain(regex)).toBeNull();
+    expect(regexToFilter(regex)).toBeNull();
+  });
+
+  it('reports what a port-qualified regex became and asks only for that host', () => {
+    const result = importAny(
+      JSON.stringify([
+        {
+          version: 2,
+          title: 'Local',
+          headers: [{ enabled: true, name: 'X-Debug', value: '1' }],
+          urlFilters: [{ enabled: true, urlRegex: '^https?://localhost:3000/.*' }],
+        },
+      ]),
+      NOW,
+    );
+    const p = result.profiles[0]!;
+    expect(p.filters).toMatchObject([{ kind: 'urlFilter', value: '||localhost:3000/' }]);
+    expect(result.report.lines).toContainEqual({
+      level: 'info',
+      profile: 'Local',
+      message:
+        'Filter ^https?://localhost:3000/.* became the URL filter ||localhost:3000/ (port 3000 only, any scheme, also subdomains), so Headerbench asks for access to that site instead of every site.',
+    });
+    expect(originsFor(p)).toEqual([
+      'http://*.localhost/*',
+      'http://localhost/*',
+      'https://*.localhost/*',
+      'https://localhost/*',
+    ]);
+  });
+
+  it('gives a single-scheme filter only that scheme’s permission', () => {
+    const result = importAny(
+      JSON.stringify([
+        {
+          version: 2,
+          title: 'Prod',
+          headers: [{ enabled: true, name: 'X-Debug', value: '1' }],
+          urlFilters: [{ enabled: true, urlRegex: '^https://api\\.example\\.com/.*' }],
+        },
+      ]),
+      NOW,
+    );
+    expect(originsFor(result.profiles[0]!)).toEqual(['https://api.example.com/*']);
   });
 });

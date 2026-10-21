@@ -11,7 +11,7 @@ import {
 } from '../src/ui/format';
 import { Popup } from '../src/ui/popup/Popup';
 import { Welcome } from '../src/ui/welcome/Welcome';
-import { DAY, NOW, domain, header, licenseKey, profile, stateWith } from './helpers';
+import { DAY, HOUR, NOW, domain, header, licenseKey, profile, stateWith } from './helpers';
 import { uiSetup } from './ui-harness';
 
 describe('site access logic', () => {
@@ -145,12 +145,14 @@ describe('popup', () => {
     await t.mount(<Popup />);
     expect(screen.getByText('Staging API')).toBeTruthy();
     expect(screen.getByText('1 header · api.staging.example.com')).toBeTruthy();
-    fireEvent.click(screen.getByRole('switch', { name: 'Turn on Staging API' }));
+    const toggle = screen.getByRole('switch', { name: 'Staging API' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(toggle);
     await waitFor(() => expect(t.fake.dynamicRules).toHaveLength(1));
-    expect(await screen.findByRole('switch', { name: 'Turn off Staging API' })).toBeTruthy();
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
   });
 
-  it('asks for site access after turning a profile on, and marks a refusal as blocked', async () => {
+  it('asks for site access after turning a profile on, and says when it was not granted', async () => {
     const t = uiSetup();
     const p = profile('Api', {
       requestHeaders: [header('X-A', '1')],
@@ -165,9 +167,7 @@ describe('popup', () => {
     ).toBeTruthy();
     t.fake.grantOnRequest = false;
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
-    expect(
-      await screen.findByText(/Blocked by Chrome: no site access to api.example.com/),
-    ).toBeTruthy();
+    expect(await screen.findByText('Site access not granted for api.example.com.')).toBeTruthy();
     expect(t.fake.requests).toEqual([
       [
         'http://*.api.example.com/*',
@@ -178,7 +178,7 @@ describe('popup', () => {
     ]);
     t.fake.grantOnRequest = true;
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(screen.queryByText(/Blocked by Chrome/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/Site access not granted/)).toBeNull());
   });
 
   it('asks for the profile’s sites and this page in one request when turning a profile on', async () => {
@@ -191,19 +191,13 @@ describe('popup', () => {
     await t.mount(<Popup />);
     await screen.findByRole('region', { name: 'Applied on this tab' });
     t.fake.grantOnRequest = false;
-    fireEvent.click(screen.getByRole('switch', { name: 'Turn on Local API' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Local API' }));
     await waitFor(() =>
       expect(t.fake.requests).toEqual([
-        [
-          'http://*.127.0.0.1/*',
-          'http://127.0.0.1/*',
-          'https://*.127.0.0.1/*',
-          'https://127.0.0.1/*',
-          'http://localhost/*',
-        ],
+        ['http://127.0.0.1/*', 'https://127.0.0.1/*', 'http://localhost/*'],
       ]),
     );
-    expect(await screen.findByText(/Blocked by Chrome: no site access to 127.0.0.1/)).toBeTruthy();
+    expect(await screen.findByText('Site access not granted for 127.0.0.1.')).toBeTruthy();
     expect(t.fake.dynamicRules).toHaveLength(1);
   });
 
@@ -274,12 +268,112 @@ describe('popup', () => {
     });
     await t.save(stateWith([p]));
     await t.mount(<Popup />);
-    fireEvent.click(screen.getByRole('switch', { name: 'Turn on Prod' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Prod' }));
     const dialog = await screen.findByRole('dialog', { hidden: true });
     expect(within(dialog).getByText(/is tagged Prod/)).toBeTruthy();
     expect(t.fake.dynamicRules).toHaveLength(0);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Turn on', hidden: true }));
     await waitFor(() => expect(t.fake.dynamicRules).toHaveLength(1));
+  });
+
+  it('confirms a Prod profile and asks for access when widening it from other tabs to all', async () => {
+    const t = uiSetup({ tab: { id: 5, url: 'https://app.example.com/' } });
+    const p = profile('Prod', {
+      env: 'prod',
+      requestHeaders: [header('X-A', '1')],
+      filters: [domain('api.example.com')],
+    });
+    await t.save(stateWith([p], { activations: [{ profileId: p.id, tabId: 9, pauseAt: null }] }));
+    await t.mount(<Popup />);
+    await screen.findByRole('region', { name: 'Applied on this tab' });
+    fireEvent.click(screen.getByRole('switch', { name: 'Prod' }));
+    const choice = await screen.findByRole('dialog', { name: 'Turn on Prod', hidden: true });
+    expect(
+      within(choice).getByText(
+        'It is on in 1 other tab. Add this tab, or turn it on in every tab?',
+      ),
+    ).toBeTruthy();
+    fireEvent.click(within(choice).getByRole('button', { name: 'All tabs', hidden: true }));
+    const confirm = await screen.findByRole('dialog', {
+      name: 'Turn on a production profile?',
+      hidden: true,
+    });
+    expect(t.fake.requests).toEqual([]);
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Turn on', hidden: true }));
+    expect(t.fake.requests).toHaveLength(1);
+    await waitFor(() =>
+      expect(t.store.state.settings.activations).toEqual([
+        { profileId: p.id, tabId: null, pauseAt: null },
+      ]),
+    );
+  });
+
+  it('asks for access in the click that widens a profile from one tab to all tabs', async () => {
+    const t = uiSetup({ tab: { id: 5, url: 'https://app.example.com/' } });
+    const p = profile('Api', {
+      requestHeaders: [header('X-A', '1')],
+      filters: [domain('api.example.com')],
+    });
+    await t.save(stateWith([p], { activations: [{ profileId: p.id, tabId: 5, pauseAt: null }] }));
+    await t.mount(<Popup />);
+    await screen.findByRole('region', { name: 'Applied on this tab' });
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Api' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'All tabs' }));
+    expect(t.fake.requests).toHaveLength(1);
+    await waitFor(() =>
+      expect(t.store.state.settings.activations).toEqual([
+        { profileId: p.id, tabId: null, pauseAt: null },
+      ]),
+    );
+  });
+
+  it('labels tab scopes from this tab’s point of view when a profile is on in several tabs', async () => {
+    const t = uiSetup({ tab: { id: 5, url: 'https://app.example.com/' } });
+    const p = profile('Api', { requestHeaders: [header('X-A', '1')] });
+    const on = (...tabs: number[]) =>
+      t.save(
+        stateWith([p], {
+          activations: tabs.map((tabId) => ({ profileId: p.id, tabId, pauseAt: NOW + HOUR })),
+        }),
+      );
+    await on(5, 9);
+    const view = await t.mount(<Popup />);
+    await screen.findByRole('region', { name: 'Applied on this tab' });
+    const open = () => fireEvent.click(screen.getByRole('button', { name: 'Options for Api' }));
+    open();
+    const here = screen.getByRole('menuitemradio', { name: 'This tab' });
+    expect(here.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('menuitem', { name: 'Turn off in all 2 tabs' })).toBeTruthy();
+    expect(screen.queryByRole('menuitemradio', { name: /Pauses at/ })).toBeNull();
+    expect(screen.getByText(/^Auto-pause · pauses at /)).toBeTruthy();
+    open();
+    view.unmount();
+
+    await on(7, 9);
+    await t.mount(<Popup />);
+    await screen.findByRole('region', { name: 'Applied on this tab' });
+    open();
+    expect(screen.getByRole('menuitemradio', { name: 'This tab too' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Turn off in 2 other tabs' }));
+    await waitFor(() => expect(t.store.state.settings.activations).toEqual([]));
+  });
+
+  it('offers to add this tab when the switch turns on a profile that is on in another tab', async () => {
+    const t = uiSetup({ tab: { id: 5, url: 'https://app.example.com/' } });
+    const p = profile('Api', { requestHeaders: [header('X-A', '1')] });
+    await t.save(stateWith([p], { activations: [{ profileId: p.id, tabId: 9, pauseAt: null }] }));
+    await t.mount(<Popup />);
+    await screen.findByRole('region', { name: 'Applied on this tab' });
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Api' }));
+    expect(screen.getByRole('menuitem', { name: 'Turn off in the other tab' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Api' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Api' }));
+    const choice = await screen.findByRole('dialog', { name: 'Turn on Api', hidden: true });
+    fireEvent.click(within(choice).getByRole('button', { name: 'This tab too', hidden: true }));
+    expect(t.fake.requests).toHaveLength(1);
+    await waitFor(() =>
+      expect(t.store.state.settings.activations.map((a) => a.tabId).sort()).toEqual([5, 9]),
+    );
   });
 
   it('shows what applied on this tab from Chrome’s matched rules', async () => {
@@ -365,16 +459,9 @@ describe('editor', () => {
     location.hash = `#/profile/${p.id}`;
     await t.mount(<AppShell />);
     expect(screen.queryByText(/Requests sent from other sites/)).toBeNull();
-    fireEvent.click(screen.getAllByRole('switch', { name: 'Turn on Local API' })[0] as HTMLElement);
+    fireEvent.click(screen.getAllByRole('switch', { name: 'Local API' })[0] as HTMLElement);
     await waitFor(() =>
-      expect(t.fake.requests).toEqual([
-        [
-          'http://*.127.0.0.1/*',
-          'http://127.0.0.1/*',
-          'https://*.127.0.0.1/*',
-          'https://127.0.0.1/*',
-        ],
-      ]),
+      expect(t.fake.requests).toEqual([['http://127.0.0.1/*', 'https://127.0.0.1/*']]),
     );
     const note = await screen.findByText(
       "Requests sent from other sites (like your localhost app) also need access to that site. Open Headerbench's popup on that page to allow it, or allow all sites.",
@@ -422,6 +509,23 @@ describe('editor', () => {
     expect(within(item).getByText(/No profile changes requests to this site/)).toBeTruthy();
     expect(within(item).getByRole('button', { name: 'Revoke' })).toBeTruthy();
     expect(screen.getByText('Changed by Local API')).toBeTruthy();
+  });
+
+  it('states on the Permissions page when Chrome needs the sending page and when Headerbench renews', async () => {
+    const t = uiSetup();
+    location.hash = '#/permissions';
+    await t.mount(<AppShell />);
+    expect(
+      await screen.findByText(
+        /requests a page sends itself, like fetch calls, also need that page/,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /The only network request renews a yearly Pro licence in its last 14 days \(in the background, at most every six hours\) or when you click Refresh, and it carries only the key\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/open Headerbench page sees the licence/)).toBeNull();
   });
 
   it('keeps the last checked request type enabled but refuses to uncheck it', async () => {

@@ -3,6 +3,7 @@ import type { ComponentChildren } from 'preact';
 import type { RequestType, Reply } from '../src/messages';
 import { StoreContext } from '../src/ui/context';
 import type { ActiveTab, Platform } from '../src/ui/platform';
+import { STATE_KEYS } from '../src/ui/platform';
 import { Store } from '../src/ui/store';
 import { setup } from './helpers';
 
@@ -14,7 +15,7 @@ export function uiSetup(options: { tab?: ActiveTab | null } = {}) {
     send: (req) => t.bg.dispatch(req) as Promise<Reply<RequestType>> as never,
     onStateChange(listener) {
       const handler = (changes: Record<string, unknown>, area: string): void => {
-        if (area === 'local' && 'state' in changes) listener();
+        if (area === 'local' && STATE_KEYS.some((k) => k in changes)) listener();
       };
       t.api.storage.onChanged.addListener(handler);
       return () => t.api.storage.onChanged.removeListener(handler);

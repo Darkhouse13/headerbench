@@ -10,6 +10,11 @@ import type {
 } from '@headerbench/core';
 import { ALL_ORIGINS } from '@headerbench/core';
 
+/** A profile's name for display and labels; never empty. */
+export function profileName(profile: Profile): string {
+  return profile.name.trim() || 'Untitled profile';
+}
+
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -130,6 +135,16 @@ export function formatTime(ms: number, now: number): string {
     return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`;
   }
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** "just now", "5 minutes ago", "3 hours ago", "2 days ago". */
+export function formatAgo(ms: number, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - ms) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${plural(minutes, 'minute')} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${plural(hours, 'hour')} ago`;
+  return `${plural(Math.floor(hours / 24), 'day')} ago`;
 }
 
 export function formatDate(ms: number): string {

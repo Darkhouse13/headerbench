@@ -20,8 +20,12 @@ function hostOf(url: string | null): string | null {
 }
 
 function explanation(explain: Match[], anyOn: boolean, host: string): string {
-  const blocked = explain.find((m) => !m.applied && m.reason);
+  // A rule the tester could not evaluate is not a reason; it may well have applied.
+  const blocked = explain.find((m) => m.previewed && !m.applied && m.reason);
   if (blocked?.reason) return blocked.reason;
+  if (explain.some((m) => !m.previewed)) {
+    return "A regex rule can't be previewed here. Chrome still applies it to the requests it matches.";
+  }
   if (!anyOn) return 'No profile is on. Turn one on above.';
   return `No profile that is on covers ${host}.`;
 }

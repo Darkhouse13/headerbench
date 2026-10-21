@@ -78,7 +78,7 @@ function headers(
   profile: string,
   report: ReportBuilder,
 ): HeaderMod[] {
-  const append = isAppendMode(raw.appendMode);
+  const append = isAppendMode(raw.appendMode, profile, report);
   const sendEmpty = raw.sendEmptyHeader === true;
   let empty = 0;
   const out: HeaderMod[] = [];

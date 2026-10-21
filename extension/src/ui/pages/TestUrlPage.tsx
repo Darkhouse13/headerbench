@@ -1,7 +1,8 @@
 import type { Match, Method, ResourceType } from '@headerbench/core';
 import { METHODS, RESOURCE_TYPES } from '@headerbench/core';
-import { CircleCheck, CircleMinus, SearchCheck, ShieldAlert } from 'lucide-preact';
-import { useEffect, useState } from 'preact/hooks';
+import type { LucideIcon } from 'lucide-preact';
+import { CircleCheck, CircleHelp, CircleMinus, SearchCheck, ShieldAlert } from 'lucide-preact';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { activeProfiles } from '../../activations';
 import type { TestUrlResult } from '../../messages';
 import { Banner, Button, EmptyState, Field, Issue } from '../components/controls';
@@ -18,20 +19,30 @@ function originLabelOf(pattern: string | null): string {
   return /^[^:]+:\/\/([^/]+)\//.exec(pattern ?? '')?.[1] ?? 'it';
 }
 
+/** What the tester concluded about one rule. */
+function verdict(match: Match): { icon: LucideIcon; label: string; modifier: string | null } {
+  if (match.applied) return { icon: CircleCheck, label: 'Applies', modifier: 'match--applied' };
+  if (!match.previewed) {
+    return { icon: CircleHelp, label: "Can't preview", modifier: 'match--unknown' };
+  }
+  return { icon: CircleMinus, label: 'Does not apply', modifier: null };
+}
+
 function MatchRow({ match }: { match: Match }) {
   const { action, detail } = describeEffect(match.effect);
-  const Icon = match.applied ? CircleCheck : CircleMinus;
+  const { icon: Icon, label, modifier } = verdict(match);
   return (
-    <li class={match.applied ? 'match match--applied' : 'match'}>
-      <Icon
-        class="icon match__icon"
-        size={18}
-        aria-label={match.applied ? 'Applies' : 'Does not apply'}
-      />
+    <li class={modifier ? `match ${modifier}` : 'match'}>
+      <Icon class="icon match__icon" size={18} aria-label={label} />
       <div class="grow">
         <div class="match__action">{action}</div>
         {detail && <div class="match__detail mono">{detail}</div>}
         {match.reason && <div class="match__reason">{match.reason}</div>}
+        {match.notes.map((note) => (
+          <Issue key={note} tone="info">
+            {note}
+          </Issue>
+        ))}
         {match.warnings.map((w, i) => (
           <Issue key={i} tone={w.severity === 'error' ? 'error' : 'warning'}>
             {w.message}
@@ -42,6 +53,15 @@ function MatchRow({ match }: { match: Match }) {
   );
 }
 
+/** The request a result answers, as it was sent. */
+interface Tested {
+  url: string;
+  method: Method;
+  resourceType: ResourceType;
+  /** The sending page, when one was given. */
+  initiator?: string;
+}
+
 export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
   const store = useStore();
   const { platform } = store;
@@ -50,33 +70,46 @@ export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
   const [method, setMethod] = useState<Method>('get');
   const [initiator, setInitiator] = useState('');
   const [result, setResult] = useState<TestUrlResult | null>(null);
-  const [tested, setTested] = useState('');
+  const [tested, setTested] = useState<Tested | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Only the latest test is shown, whatever order the answers arrive in.
+  const latest = useRef(0);
 
-  const run = async (): Promise<void> => {
-    if (url.trim() === '') return;
-    setTested(url.trim());
+  /** The request the form describes, for `target` (the URL field by default). */
+  const fromForm = (target = url): Tested => {
     const from = initiator.trim();
-    setResult(
-      await store.call({
-        type: 'testUrl',
-        url: url.trim(),
-        resourceType,
-        method,
-        ...(from ? { initiator: from } : {}),
-      }),
-    );
+    return { url: target.trim(), method, resourceType, ...(from ? { initiator: from } : {}) };
+  };
+
+  const run = async (request: Tested = fromForm()): Promise<void> => {
+    if (request.url === '') return;
+    const id = ++latest.current;
+    try {
+      const answer = await store.call({ type: 'testUrl', ...request });
+      if (id !== latest.current) return;
+      setResult(answer);
+      setTested(request);
+      setError(null);
+    } catch (e) {
+      if (id !== latest.current) return;
+      setResult(null);
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   useEffect(() => {
-    if (initialUrl) void run();
-    // Runs once for a URL handed over from the popup.
-  }, []);
+    // A URL handed over from the popup, also while this page is already open.
+    setUrl(initialUrl);
+    if (initialUrl) void run(fromForm(initialUrl));
+    // Only a new URL in the address bar starts a test; form edits wait for the Test button.
+  }, [initialUrl]);
 
   const host = result?.origin ? new URL(result.origin).host : null;
   const groups = new Map<string, Match[]>();
   for (const m of result?.matches ?? [])
     groups.set(m.profileName, [...(groups.get(m.profileName) ?? []), m]);
   const applied = result?.matches.filter((m) => m.applied).length ?? 0;
+  const unknown = result?.matches.filter((m) => !m.previewed).length ?? 0;
   const missing =
     result?.origin != null
       ? [
@@ -93,8 +126,15 @@ export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
   const anyOn = activeProfiles(store.state, platform.now()).length > 0;
 
   const grant = async (): Promise<void> => {
-    if (missing.length === 0) return;
-    if (await platform.permissions.request(missing).catch(() => false)) await run();
+    if (missing.length === 0 || tested === null) return;
+    // Re-run the request the result answers, not whatever the form holds now.
+    if (await platform.permissions.request(missing).catch(() => false)) await run(tested);
+  };
+
+  const heading = (): string => {
+    if (result?.matches.length === 0) return 'No rule matches this request';
+    const summary = `${plural(applied, 'rule')} would apply to ${host}`;
+    return unknown > 0 ? `${summary}, ${unknown} can't be previewed` : summary;
   };
 
   return (
@@ -117,7 +157,8 @@ export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
           <input
             id="test-url"
             class="input mono"
-            type="url"
+            type="text"
+            inputMode="url"
             spellcheck={false}
             autocomplete="off"
             value={url}
@@ -161,7 +202,8 @@ export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
             <input
               id="test-initiator"
               class="input mono"
-              type="url"
+              type="text"
+              inputMode="url"
               spellcheck={false}
               autocomplete="off"
               placeholder="http://localhost:5173/"
@@ -175,6 +217,11 @@ export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
         </Button>
       </form>
 
+      {error && (
+        <Banner tone="error" title="The test did not run">
+          {error}
+        </Banner>
+      )}
       {result && result.origin === null && (
         <Banner tone="error">
           Enter a full URL that starts with http:// or https://, for example
@@ -184,14 +231,13 @@ export function TestUrlPage({ initialUrl }: { initialUrl: string }) {
       {result && result.origin !== null && (
         <section class="card test-results" aria-live="polite">
           <div class="card__section">
-            <h2>
-              {result.matches.length === 0
-                ? 'No rule matches this request'
-                : `${plural(applied, 'rule')} would apply to ${host}`}
-            </h2>
-            <p class="muted mono truncate" title={tested}>
-              {METHOD_LABELS[method]} {tested}
-            </p>
+            <h2>{heading()}</h2>
+            {tested && (
+              <p class="muted mono truncate" title={tested.url}>
+                {METHOD_LABELS[tested.method]} {tested.url} ·{' '}
+                {RESOURCE_TYPE_LABELS[tested.resourceType]}
+              </p>
+            )}
           </div>
           {needsAccess && (
             <div class="card__section">

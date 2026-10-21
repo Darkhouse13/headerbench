@@ -222,15 +222,38 @@ function sanitizeSettings(raw: unknown, profileIds: Set<string>): Settings {
 export type MigrateResult =
   { ok: true; state: State } | { ok: false; reason: 'not_an_object' | 'newer_schema' };
 
+/** Upgrades a stored blob of schema version `n` to version `n + 1`. */
+export type Migration = (raw: Raw) => Raw;
+
+/**
+ * The version ladder: `MIGRATIONS[n]` turns version n into n + 1, and there is a step for every
+ * version below SCHEMA_VERSION. A schema bump adds its step here and raises SCHEMA_VERSION.
+ * v0 (no `schemaVersion`) is a loose v1: the sanitizer that runs after the ladder repairs it.
+ */
+export const MIGRATIONS: Readonly<Record<number, Migration>> = {
+  0: (raw) => raw,
+};
+
+function climb(raw: Raw, from: number): Raw {
+  let out = raw;
+  for (let v = from; v < SCHEMA_VERSION; v++) {
+    const step = MIGRATIONS[v];
+    if (!step) throw new Error(`No migration from schema version ${v}.`);
+    out = step(out);
+  }
+  return out;
+}
+
 /**
  * Upgrades `raw` (from storage) to the current schema. Fails only when there is nothing usable
  * (not an object) or the data comes from a newer Headerbench, so the caller can fall back to the
  * backup and keep the raw blob.
  */
-export function tryMigrate(raw: unknown, now: number = Date.now()): MigrateResult {
-  if (!isRecord(raw)) return { ok: false, reason: 'not_an_object' };
-  const version = num(raw.schemaVersion, 0);
+export function tryMigrate(input: unknown, now: number = Date.now()): MigrateResult {
+  if (!isRecord(input)) return { ok: false, reason: 'not_an_object' };
+  const version = num(input.schemaVersion, 0);
   if (version > SCHEMA_VERSION) return { ok: false, reason: 'newer_schema' };
+  const raw = climb(input, Math.max(0, Math.floor(version)));
   const profiles = uniqueIds(
     Array.isArray(raw.profiles)
       ? raw.profiles.filter(isRecord).map((p, i) => sanitizeProfile(p, i, now))

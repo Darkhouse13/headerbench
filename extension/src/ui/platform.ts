@@ -38,7 +38,14 @@ export interface Platform {
   now(): number;
 }
 
-const STATE_KEYS = ['state', 'runtime', 'syncStatus', 'state.corrupt'];
+/** storage.local keys whose change means the snapshot may be different. */
+export const STATE_KEYS: readonly string[] = [
+  'state',
+  'runtime',
+  'syncStatus',
+  'state.corrupt',
+  'licenseRefreshError',
+];
 
 function tabFromQuery(): number | null {
   // The popup can be opened as a regular page (E2E, store screenshots) and pointed at a tab.

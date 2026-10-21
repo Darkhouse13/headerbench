@@ -74,7 +74,8 @@ function headers(
   return s.rules.flatMap((r) => {
     const name = asString(r.name).trim();
     if (name.length === 0) return [];
-    const append = r.appendMode === undefined ? profileAppend : isAppendMode(r.appendMode);
+    const append =
+      r.appendMode === undefined ? profileAppend : isAppendMode(r.appendMode, profile, report);
     const op = OPS.find((o) => o === r.op || o === r.operation) ?? (append ? 'append' : 'set');
     return [
       headerRow(
@@ -195,7 +196,7 @@ function convertProfile(raw: Raw, index: number, now: number, report: ReportBuil
     );
   }
   const f = filters(raw.filters, name, report);
-  const append = isAppendMode(raw.appendMode);
+  const append = isAppendMode(raw.appendMode, name, report);
   const profile: Profile = {
     id: newId(),
     name,

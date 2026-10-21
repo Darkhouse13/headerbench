@@ -28,6 +28,19 @@ export interface SyncStatus {
   lastSyncedAt: number | null;
 }
 
+/**
+ * The last automatic licence refresh that failed (background alarm, browser start, editor open).
+ * Cleared when a refresh succeeds or a new key is applied. Stored in storage.local under
+ * `licenseRefreshError`; pages that watch storage should include that key.
+ */
+export interface LicenseRefreshError {
+  /** Ms since epoch. */
+  at: number;
+  code: ErrorCode;
+  /** Plain-language reason, written for users. */
+  message: string;
+}
+
 /** Everything a page needs to render. Returned by `getState` and by every mutating request. */
 export interface Snapshot {
   /** Increases on every save. `saveState` must send the rev it edited. */
@@ -40,6 +53,8 @@ export interface Snapshot {
   /** Set when the last resync could not install rules (e.g. the rule budget). */
   ruleError: string | null;
   sync: SyncStatus;
+  /** Set when the last automatic licence refresh failed; the current key stays active. */
+  licenseRefreshError: LicenseRefreshError | null;
   /** Unreadable stored data was set aside under `state.corrupt` and can be downloaded. */
   hasCorruptData: boolean;
   version: string;
@@ -109,8 +124,13 @@ export type Request =
     }
   | { type: 'getMatchesForTab'; tabId: number; url?: string }
   | { type: 'importText'; text: string; apply: boolean }
+  /**
+   * `tabId: null` turns the profile on everywhere, replacing its tab activations. A tab id adds
+   * that tab and keeps the profile's other tabs; it replaces a global activation.
+   */
   | { type: 'activate'; profileId: string; tabId: number | null; pauseAt: number | null }
-  | { type: 'deactivate'; profileId: string }
+  /** Without `tabId`: off everywhere. With `tabId`: off in that tab only. */
+  | { type: 'deactivate'; profileId: string; tabId?: number }
   | { type: 'setPaused'; paused: boolean }
   | { type: 'applyLicense'; key: string }
   | { type: 'refreshLicense'; auto: boolean }
@@ -144,6 +164,8 @@ export interface ResponseMap {
 export type ErrorCode =
   | 'invalid_request'
   | 'invalid_state'
+  /** Chrome's 10 MB storage.local quota is full; nothing was saved. */
+  | 'storage_full'
   | 'conflict'
   | 'not_found'
   | 'license_invalid'
@@ -219,7 +241,13 @@ export function parseRequest(raw: unknown): Request | null {
         ? { type: 'activate', profileId: r.profileId, tabId: r.tabId, pauseAt: r.pauseAt }
         : null;
     case 'deactivate':
-      return isStr(r.profileId) ? { type: 'deactivate', profileId: r.profileId } : null;
+      return isStr(r.profileId) && (r.tabId === undefined || isInt(r.tabId))
+        ? {
+            type: 'deactivate',
+            profileId: r.profileId,
+            ...(isInt(r.tabId) ? { tabId: r.tabId } : {}),
+          }
+        : null;
     case 'setPaused':
       return typeof r.paused === 'boolean' ? { type: 'setPaused', paused: r.paused } : null;
     case 'applyLicense':

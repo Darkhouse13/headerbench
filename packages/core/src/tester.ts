@@ -4,10 +4,19 @@
  */
 import type { CompileContext, RuleKind, RuleSource, Warning } from './compile.js';
 import { compile } from './compile.js';
-import type { DnrRule, DnrRuleCondition } from './dnr.js';
+import type { DnrModifyHeaderInfo, DnrRule, DnrRuleCondition } from './dnr.js';
 import type { Method, Profile, ResourceType, State } from './model.js';
+import { FRAME_TYPES } from './model.js';
 import { pageOrigin } from './origins.js';
+import { toJsRegExp } from './re2.js';
 import { canonicalUrl, hostMatchesDomain, matchesUrlFilter } from './urlfilter.js';
+
+/** For a rule whose regex JS cannot run (such as flags in the middle of the pattern). */
+export const REGEX_PREVIEW_NOTE = "Can't preview this pattern here; Chrome will still apply it.";
+
+/** Attached to every mock match. */
+export const MOCK_CSP_NOTE =
+  'Pages whose Content-Security-Policy blocks data: URLs (connect-src, script-src…) refuse mocks. Add the Remove Content Security Policy preset to this profile.';
 
 export interface TestRequest {
   url: string;
@@ -19,7 +28,8 @@ export interface TestRequest {
   initiator?: string;
   /**
    * Whether Headerbench has host access to a URL. Chrome applies header and redirect rules only
-   * when both the request URL and its http(s) initiator are granted. Omit to assume access.
+   * when the request URL is granted and, except for page and frame loads, its http(s) initiator
+   * too. Omit to assume access.
    */
   hasHostAccess?: (url: string) => boolean;
 }
@@ -48,7 +58,19 @@ export interface Match {
   applied: boolean;
   /** Why it does not apply; `null` when applied. */
   reason: string | null;
+  /**
+   * False when the tester could not evaluate this rule's regex in JS: `applied` is false and
+   * `reason` is REGEX_PREVIEW_NOTE, but Chrome applies it if the pattern matches.
+   */
+  previewed: boolean;
+  /** Extra facts about the effect, such as MOCK_CSP_NOTE. */
+  notes: string[];
   warnings: Warning[];
+}
+
+/** Whether Chrome needs host access to the initiator page for header and redirect rules. */
+export function needsInitiatorAccess(resourceType: ResourceType): boolean {
+  return !FRAME_TYPES.includes(resourceType);
 }
 
 interface Candidate {
@@ -65,21 +87,16 @@ const ACTION_RANK: Record<DnrRule['action']['type'], number> = {
   modifyHeaders: 0,
 };
 
+/** `unknown` when the condition's regex can't run in JS and everything else matches. */
 function conditionMatches(
   c: DnrRuleCondition,
   url: string,
   host: string,
   req: TestRequest,
-): boolean {
+): boolean | 'unknown' {
   if (
     c.urlFilter !== undefined &&
     !matchesUrlFilter(c.urlFilter, url, c.isUrlFilterCaseSensitive)
-  ) {
-    return false;
-  }
-  if (
-    c.regexFilter !== undefined &&
-    !new RegExp(c.regexFilter, c.isUrlFilterCaseSensitive ? '' : 'i').test(url)
   ) {
     return false;
   }
@@ -88,12 +105,16 @@ function conditionMatches(
   if (c.resourceTypes && !c.resourceTypes.includes(req.resourceType)) return false;
   if (c.requestMethods && !c.requestMethods.includes(req.method)) return false;
   if (c.tabIds && (req.tabId === undefined || !c.tabIds.includes(req.tabId))) return false;
+  if (c.regexFilter !== undefined) {
+    const re = toJsRegExp(c.regexFilter, c.isUrlFilterCaseSensitive);
+    return re === null ? 'unknown' : re.test(url);
+  }
   return true;
 }
 
 /** Applies a DNR regexSubstitution (`\1`, `\\`) to the first match, as Chrome does. */
 function applySubstitution(url: string, regexFilter: string, substitution: string): string {
-  const match = new RegExp(regexFilter, 'i').exec(url);
+  const match = toJsRegExp(regexFilter)?.exec(url);
   if (!match) return url;
   const replacement = substitution.replace(/\\(\\|\d)/g, (_, c: string) =>
     c === '\\' ? '\\' : (match[Number(c)] ?? ''),
@@ -116,8 +137,17 @@ interface HeaderState {
   profileName: string;
 }
 
+/** Chrome matches page and frame loads with their #fragment; subresource URLs have none. */
+function matchUrl(req: TestRequest): string | null {
+  const canonical = canonicalUrl(req.url);
+  if (canonical === null || FRAME_TYPES.includes(req.resourceType)) return canonical;
+  const url = new URL(canonical);
+  url.hash = '';
+  return url.href;
+}
+
 export function testUrl(state: State, ctx: CompileContext, req: TestRequest): Match[] {
-  const url = canonicalUrl(req.url);
+  const url = matchUrl(req);
   if (url === null) return [];
   const host = new URL(url).hostname;
   const compiled = compile(state, ctx);
@@ -128,14 +158,17 @@ export function testUrl(state: State, ctx: CompileContext, req: TestRequest): Ma
   for (const rule of compiled.dynamic) rulesByKey.set(`dynamic:${rule.id}`, rule);
   for (const rule of compiled.session) rulesByKey.set(`session:${rule.id}`, rule);
 
-  const candidates: Candidate[] = compiled.sources
-    .map((source) => ({
-      source,
-      rule: rulesByKey.get(`${source.list}:${source.ruleId}`) as DnrRule,
-      profile: profiles.get(source.profileId) as Profile,
-    }))
-    .filter((c) => conditionMatches(c.rule.condition, url, host, req))
-    .sort(byPriority);
+  const candidates: Candidate[] = [];
+  const unknown: Candidate[] = [];
+  for (const source of compiled.sources) {
+    const rule = rulesByKey.get(`${source.list}:${source.ruleId}`) as DnrRule;
+    const result = conditionMatches(rule.condition, url, host, req);
+    if (result === false) continue;
+    const candidate = { source, rule, profile: profiles.get(source.profileId) as Profile };
+    (result === true ? candidates : unknown).push(candidate);
+  }
+  candidates.sort(byPriority);
+  unknown.sort(byPriority);
 
   const noAccessReason = accessProblem(req, url, host);
   const noAccess = noAccessReason !== null;
@@ -152,13 +185,14 @@ export function testUrl(state: State, ctx: CompileContext, req: TestRequest): Ma
   const base = (
     c: Candidate,
     itemId: string | null,
-  ): Omit<Match, 'effect' | 'applied' | 'reason'> => ({
+  ): Omit<Match, 'effect' | 'applied' | 'reason' | 'notes'> => ({
     profileId: c.profile.id,
     profileName: c.profile.name,
     list: c.source.list,
     ruleId: c.rule.id,
     kind: c.source.kind,
     itemId,
+    previewed: true,
     warnings: warningsFor(c.profile.id, itemId),
   });
   const terminalReason = (): string => {
@@ -186,7 +220,8 @@ export function testUrl(state: State, ctx: CompileContext, req: TestRequest): Ma
         : noAccess && needsAccess(c)
           ? noAccessReason
           : terminalReason();
-      matches.push({ ...base(c, itemId), effect: terminalEffect(c, url, itemId), applied, reason });
+      const effect = terminalEffect(c, url, itemId);
+      matches.push({ ...base(c, itemId), effect, applied, reason, notes: notesFor(effect) });
       continue;
     }
     const blockedBy =
@@ -194,19 +229,9 @@ export function testUrl(state: State, ctx: CompileContext, req: TestRequest): Ma
       (terminal.rule.action.type !== 'allow' || terminal.rule.priority >= c.rule.priority)
         ? terminalReason()
         : null;
-    const ops = [
-      ...(action.requestHeaders ?? []).map((op) => ({ op, direction: 'request' as const })),
-      ...(action.responseHeaders ?? []).map((op) => ({ op, direction: 'response' as const })),
-    ];
-    ops.forEach(({ op, direction }, i) => {
+    headerOps(action).forEach(({ op, direction }, i) => {
       const itemId = c.source.itemIds[i] ?? null;
-      const effect: Effect = {
-        type: 'header',
-        direction,
-        header: headerLabel(c.profile, itemId, op.header),
-        operation: op.operation,
-        ...(op.value !== undefined ? { value: op.value } : {}),
-      };
+      const effect = headerEffect(c, op, direction, itemId);
       let reason = noAccessReason ?? blockedBy;
       if (reason === null) {
         const key = `${direction}:${op.header.toLowerCase()}`;
@@ -222,10 +247,61 @@ export function testUrl(state: State, ctx: CompileContext, req: TestRequest): Ma
           });
         }
       }
-      matches.push({ ...base(c, itemId), effect, applied: reason === null, reason });
+      matches.push({ ...base(c, itemId), effect, applied: reason === null, reason, notes: [] });
     });
   }
+  for (const c of unknown) {
+    for (const [i, effect] of effectsOf(c, url).entries()) {
+      matches.push({
+        ...base(c, c.source.itemIds[i] ?? null),
+        effect,
+        applied: false,
+        reason: REGEX_PREVIEW_NOTE,
+        previewed: false,
+        notes: notesFor(effect),
+      });
+    }
+  }
   return matches;
+}
+
+function notesFor(effect: Effect): string[] {
+  return effect.type === 'mock' ? [MOCK_CSP_NOTE] : [];
+}
+
+/** Every effect of a rule the tester can't evaluate. */
+function effectsOf(c: Candidate, url: string): Effect[] {
+  const action = c.rule.action;
+  if (action.type !== 'modifyHeaders') {
+    return [terminalEffect(c, url, c.source.itemIds[0] ?? null)];
+  }
+  return headerOps(action).map(({ op, direction }, i) =>
+    headerEffect(c, op, direction, c.source.itemIds[i] ?? null),
+  );
+}
+
+function headerOps(
+  action: DnrRule['action'],
+): { op: DnrModifyHeaderInfo; direction: 'request' | 'response' }[] {
+  return [
+    ...(action.requestHeaders ?? []).map((op) => ({ op, direction: 'request' as const })),
+    ...(action.responseHeaders ?? []).map((op) => ({ op, direction: 'response' as const })),
+  ];
+}
+
+function headerEffect(
+  c: Candidate,
+  op: DnrModifyHeaderInfo,
+  direction: 'request' | 'response',
+  itemId: string | null,
+): Effect {
+  return {
+    type: 'header',
+    direction,
+    header: headerLabel(c.profile, itemId, op.header),
+    operation: op.operation,
+    ...(op.value !== undefined ? { value: op.value } : {}),
+  };
 }
 
 /**
@@ -244,6 +320,7 @@ function accessProblem(req: TestRequest, url: string, host: string): string | nu
   if (!granted) return null;
   if (!granted(url)) return `No site access for ${host}. Grant access so Chrome applies this rule.`;
   if (
+    needsInitiatorAccess(req.resourceType) &&
     req.initiator !== undefined &&
     pageOrigin(req.initiator) !== null &&
     !granted(req.initiator)
@@ -288,9 +365,14 @@ function terminalEffect(c: Candidate, url: string, itemId: string | null): Effec
     };
   }
   const redirect = action.redirect ?? {};
-  const to =
-    redirect.regexSubstitution !== undefined && c.rule.condition.regexFilter !== undefined
-      ? applySubstitution(url, c.rule.condition.regexFilter, redirect.regexSubstitution)
-      : (redirect.url ?? '');
-  return { type: 'redirect', to };
+  const regexFilter = c.rule.condition.regexFilter;
+  if (redirect.regexSubstitution === undefined || regexFilter === undefined) {
+    return { type: 'redirect', to: redirect.url ?? '' };
+  }
+  if (toJsRegExp(regexFilter) === null) {
+    // The pattern can't run here, so show the target as written.
+    const rule = c.profile.redirects.find((r) => r.id === itemId);
+    return { type: 'redirect', to: rule?.to ?? redirect.regexSubstitution };
+  }
+  return { type: 'redirect', to: applySubstitution(url, regexFilter, redirect.regexSubstitution) };
 }

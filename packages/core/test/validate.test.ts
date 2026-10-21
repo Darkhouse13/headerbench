@@ -70,7 +70,8 @@ describe('re2Compatible', () => {
 
   it('checkRegex also requires a valid JS regex', () => {
     expect(checkRegex('')).toMatch(/empty/);
-    expect(checkRegex('(')).toMatch(/Invalid regular expression/);
+    expect(checkRegex('(')).toBe('Missing ) to close a group.');
+    expect(checkRegex('[z-a]')).toMatch(/^Invalid regular expression: Range out of order/);
     expect(checkRegex('^a$')).toBeNull();
   });
 });

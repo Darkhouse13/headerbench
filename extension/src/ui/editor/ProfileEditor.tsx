@@ -9,8 +9,8 @@ import {
   ShieldAlert,
   Trash2,
 } from 'lucide-preact';
-import { useState } from 'preact/hooks';
-import { moveProfile } from '../../activations';
+import { useMemo, useState } from 'preact/hooks';
+import { moveProfile, sortActivations } from '../../activations';
 import type { AccessState } from '../access';
 import { accessExplainer } from '../access';
 import type { ActivationControls } from '../activation';
@@ -26,7 +26,7 @@ import {
 import { ConfirmDialog } from '../components/Dialog';
 import { Menu } from '../components/Menu';
 import { useSnapshot, useStore } from '../context';
-import { formatTime, plural, ruleCount, rulesSummary, scopeSummary } from '../format';
+import { formatTime, plural, profileName, ruleCount, rulesSummary, scopeSummary } from '../format';
 import { FiltersTab } from './FiltersTab';
 import { HeaderTable } from './HeaderTable';
 import { rowIssues } from './issues';
@@ -45,6 +45,23 @@ interface Props {
   controls: ActivationControls;
   onGrant: () => Promise<boolean>;
   onGrantAll: () => Promise<boolean>;
+}
+
+/** The tab that a tablist key moves to (arrows wrap, Home/End jump), or null for other keys. */
+export function tabKey<T>(key: string, ids: readonly T[], current: T): T | null {
+  const i = ids.indexOf(current);
+  switch (key) {
+    case 'ArrowRight':
+      return ids[(i + 1) % ids.length] ?? null;
+    case 'ArrowLeft':
+      return ids[(i - 1 + ids.length) % ids.length] ?? null;
+    case 'Home':
+      return ids[0] ?? null;
+    case 'End':
+      return ids[ids.length - 1] ?? null;
+    default:
+      return null;
+  }
 }
 
 /** Profile-level warnings shown as banners (row-level ones appear inline). */
@@ -66,10 +83,12 @@ export function ProfileEditor({
   const { platform } = store;
   const state = store.state;
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const activation = state.settings.activations.find((a) => a.profileId === profile.id) ?? null;
+  const activations = state.settings.activations.filter((a) => a.profileId === profile.id);
+  const activation = activations.find((a) => a.tabId === null) ?? activations[0] ?? null;
   const on = activation !== null;
-  const issues = rowIssues(profile, snapshot.warnings);
+  const issues = useMemo(() => rowIssues(profile, snapshot.warnings), [profile, snapshot.warnings]);
   const index = state.profiles.findIndex((p) => p.id === profile.id);
+  const name = profileName(profile);
 
   const change = (patch: Partial<Profile>): void =>
     store.updateProfile(profile.id, (p) => ({ ...p, ...patch }));
@@ -100,21 +119,35 @@ export function ProfileEditor({
   const remove = (): void => {
     setConfirmDelete(false);
     const next = state.profiles[index + 1] ?? state.profiles[index - 1];
+    const removed = profile;
+    const removedActivations = activations;
     store.update((s) => ({
       ...s,
-      profiles: s.profiles.filter((p) => p.id !== profile.id),
+      profiles: s.profiles.filter((p) => p.id !== removed.id),
       settings: {
         ...s.settings,
-        activations: s.settings.activations.filter((a) => a.profileId !== profile.id),
+        activations: s.settings.activations.filter((a) => a.profileId !== removed.id),
       },
     }));
     navigate(next ? profileHash(next.id) : '#/', true);
-    store.notify(`Deleted ${profile.name}.`);
+    store.notify(`Deleted ${name}.`, 'info', {
+      label: 'Undo',
+      run: () => {
+        store.update((s) => {
+          if (s.profiles.some((p) => p.id === removed.id)) return s;
+          const profiles = [...s.profiles];
+          profiles.splice(Math.min(index, profiles.length), 0, removed);
+          const activations = [...s.settings.activations, ...removedActivations];
+          return sortActivations({ ...s, profiles, settings: { ...s.settings, activations } });
+        });
+        navigate(profileHash(removed.id, tab), true);
+      },
+    });
   };
 
   const status = on
     ? [
-        activation.tabId !== null ? 'On in one tab' : 'On',
+        activation.tabId !== null ? `On in ${plural(activations.length, 'tab')}` : 'On',
         activation.pauseAt !== null
           ? `pauses at ${formatTime(activation.pauseAt, platform.now())}`
           : null,
@@ -145,7 +178,7 @@ export function ProfileEditor({
         <ProfileMark profile={profile} />
         <div class="grow">
           <div class="row">
-            <h1 class="truncate">{profile.name || 'Untitled profile'}</h1>
+            <h1 class="truncate">{name}</h1>
             <EnvChip env={profile.env} />
           </div>
           <div class="muted truncate">
@@ -156,7 +189,7 @@ export function ProfileEditor({
         <span class={on ? 'pe__status pe__status--on' : 'pe__status'}>{status}</span>
         <Switch
           checked={on}
-          label={on ? `Turn off ${profile.name}` : `Turn on ${profile.name}`}
+          label={name}
           onChange={(next) => void (next ? controls.turnOn(profile) : controls.turnOff(profile))}
         />
         <Menu
@@ -193,9 +226,7 @@ export function ProfileEditor({
         <Banner
           tone={access.status === 'denied' ? 'error' : 'warning'}
           icon={ShieldAlert}
-          title={
-            access.status === 'denied' ? 'Blocked by Chrome: no site access' : 'Site access needed'
-          }
+          title={access.status === 'denied' ? 'Site access not granted' : 'Site access needed'}
           actions={
             <>
               <Button small variant="primary" onClick={() => void onGrant()}>
@@ -239,7 +270,22 @@ export function ProfileEditor({
         </Banner>
       ))}
 
-      <div class="tabs" role="tablist" aria-label="Profile sections">
+      <div
+        class="tabs"
+        role="tablist"
+        aria-label="Profile sections"
+        onKeyDown={(e) => {
+          const target = tabKey(
+            e.key,
+            tabs.map((t) => t.id),
+            tab,
+          );
+          if (target === null) return;
+          e.preventDefault();
+          navigate(profileHash(profile.id, target), true);
+          document.getElementById(`tab-${target}`)?.focus();
+        }}
+      >
         {tabs.map((t) => (
           <button
             key={t.id}
@@ -249,6 +295,7 @@ export function ProfileEditor({
             id={`tab-${t.id}`}
             aria-selected={t.id === tab}
             aria-controls="profile-panel"
+            tabIndex={t.id === tab ? 0 : -1}
             onClick={() => navigate(profileHash(profile.id, t.id), true)}
           >
             {t.label}
@@ -302,7 +349,7 @@ export function ProfileEditor({
 
       {confirmDelete && (
         <ConfirmDialog
-          title={`Delete ${profile.name}?`}
+          title={`Delete ${name}?`}
           confirmLabel="Delete"
           danger
           onCancel={() => setConfirmDelete(false)}

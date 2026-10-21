@@ -9,8 +9,8 @@ import {
 import { ArrowDownToLine, ArrowUpFromLine, ChevronDown, Plus, Trash2 } from 'lucide-preact';
 import { Button, EmptyState, IconButton, Switch } from '../components/controls';
 import { Menu } from '../components/Menu';
-import type { IssueMap } from './issues';
-import { Cell, RuleRow, RuleTable, onEnter, shown, useFocusRow } from './table';
+import type { IssueMap, RowIssue } from './issues';
+import { Cell, RuleRow, RuleTable, onEnter, memoRow, shown, useFocusRow, useStable } from './table';
 
 interface Props {
   profile: Profile;
@@ -26,6 +26,110 @@ const OPS: { value: HeaderOp; label: string }[] = [
   { value: 'remove', label: 'Remove' },
 ];
 
+interface RowProps {
+  mod: HeaderMod;
+  index: number;
+  issues: readonly RowIssue[] | undefined;
+  listId: string;
+  setRow: (id: string, patch: Partial<HeaderMod>) => void;
+  addAfter: (index: number) => void;
+  remove: (id: string) => void;
+}
+
+const HeaderRow = memoRow(function HeaderRow({
+  mod: m,
+  index,
+  issues,
+  listId,
+  setRow,
+  addAfter,
+  remove,
+}: RowProps) {
+  const presetValues = valuePresetsFor(m.name);
+  const pristine = m.name === '' && m.value === '' && m.comment === '';
+  const add = onEnter(() => addAfter(index));
+  return (
+    <RuleRow id={m.id} enabled={m.enabled} issues={shown(issues, pristine)}>
+      <Cell>
+        <Switch
+          small
+          checked={m.enabled}
+          label={m.name.trim() || 'Unnamed header'}
+          onChange={(enabled) => setRow(m.id, { enabled })}
+        />
+      </Cell>
+      <Cell>
+        <input
+          class="input input--dense mono"
+          list={listId}
+          aria-label="Header name"
+          spellcheck={false}
+          autocomplete="off"
+          value={m.name}
+          onInput={(e) => setRow(m.id, { name: e.currentTarget.value })}
+          onKeyDown={add}
+        />
+      </Cell>
+      <Cell>
+        <select
+          class="select select--dense"
+          aria-label="Action"
+          value={m.op}
+          onChange={(e) => setRow(m.id, { op: e.currentTarget.value as HeaderOp })}
+        >
+          {OPS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </Cell>
+      <Cell class="rtable__cell--value">
+        <input
+          class="input input--dense mono"
+          aria-label="Value"
+          spellcheck={false}
+          autocomplete="off"
+          disabled={m.op === 'remove'}
+          value={m.op === 'remove' ? '' : m.value}
+          onInput={(e) => setRow(m.id, { value: e.currentTarget.value })}
+          onKeyDown={add}
+        />
+        {presetValues.length > 0 && m.op !== 'remove' && (
+          <Menu
+            entries={presetValues.map((p) => ({
+              label: p.label,
+              description: p.value.length > 48 ? `${p.value.slice(0, 48)}…` : p.value,
+              onSelect: () => setRow(m.id, { value: p.value }),
+            }))}
+            trigger={(props) => (
+              <IconButton icon={ChevronDown} small label={`Common ${m.name} values`} {...props} />
+            )}
+          />
+        )}
+      </Cell>
+      <Cell>
+        <input
+          class="input input--dense"
+          aria-label="Comment"
+          value={m.comment}
+          title={m.comment}
+          onInput={(e) => setRow(m.id, { comment: e.currentTarget.value })}
+          onKeyDown={add}
+        />
+      </Cell>
+      <Cell>
+        <IconButton
+          icon={Trash2}
+          small
+          label={`Delete ${m.name || 'this row'}`}
+          onClick={() => remove(m.id)}
+        />
+      </Cell>
+    </RuleRow>
+  );
+});
+
 export function HeaderTable({ profile, direction, issues, onChange }: Props) {
   const mods = direction === 'request' ? profile.requestHeaders : profile.responseHeaders;
   const focusRow = useFocusRow();
@@ -34,15 +138,17 @@ export function HeaderTable({ profile, direction, issues, onChange }: Props) {
   const presets = HEADER_PRESETS.filter((p) => p.direction === direction);
   const noun = direction === 'request' ? 'request header' : 'response header';
 
-  const setRow = (id: string, patch: Partial<HeaderMod>): void =>
-    onChange(mods.map((m) => (m.id === id ? { ...m, ...patch } : m)));
-  const addAfter = (index: number): void => {
+  const setRow = useStable((id: string, patch: Partial<HeaderMod>): void =>
+    onChange(mods.map((m) => (m.id === id ? { ...m, ...patch } : m))),
+  );
+  const addAfter = useStable((index: number): void => {
     const row = newHeaderMod();
     const next = [...mods];
     next.splice(index + 1, 0, row);
     onChange(next);
     focusRow(row.id);
-  };
+  });
+  const remove = useStable((id: string): void => onChange(mods.filter((x) => x.id !== id)));
   const addPreset = (preset: HeaderPreset): void =>
     onChange([
       ...mods,
@@ -91,100 +197,18 @@ export function HeaderTable({ profile, direction, issues, onChange }: Props) {
             template={TEMPLATE}
             columns={['On', 'Name', 'Action', 'Value', 'Comment', '']}
           >
-            {mods.map((m, i) => {
-              const presetValues = valuePresetsFor(m.name);
-              const pristine = m.name === '' && m.value === '' && m.comment === '';
-              return (
-                <RuleRow
-                  key={m.id}
-                  id={m.id}
-                  enabled={m.enabled}
-                  issues={shown(issues.get(m.id), pristine)}
-                >
-                  <Cell>
-                    <Switch
-                      small
-                      checked={m.enabled}
-                      label={`${m.enabled ? 'Turn off' : 'Turn on'} ${m.name || 'this header'}`}
-                      onChange={(enabled) => setRow(m.id, { enabled })}
-                    />
-                  </Cell>
-                  <Cell>
-                    <input
-                      class="input input--dense mono"
-                      list={listId}
-                      aria-label="Header name"
-                      spellcheck={false}
-                      autocomplete="off"
-                      value={m.name}
-                      onInput={(e) => setRow(m.id, { name: e.currentTarget.value })}
-                      onKeyDown={onEnter(() => addAfter(i))}
-                    />
-                  </Cell>
-                  <Cell>
-                    <select
-                      class="select select--dense"
-                      aria-label="Action"
-                      value={m.op}
-                      onChange={(e) => setRow(m.id, { op: e.currentTarget.value as HeaderOp })}
-                    >
-                      {OPS.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
-                  </Cell>
-                  <Cell class="rtable__cell--value">
-                    <input
-                      class="input input--dense mono"
-                      aria-label="Value"
-                      spellcheck={false}
-                      autocomplete="off"
-                      disabled={m.op === 'remove'}
-                      value={m.op === 'remove' ? '' : m.value}
-                      onInput={(e) => setRow(m.id, { value: e.currentTarget.value })}
-                      onKeyDown={onEnter(() => addAfter(i))}
-                    />
-                    {presetValues.length > 0 && m.op !== 'remove' && (
-                      <Menu
-                        entries={presetValues.map((p) => ({
-                          label: p.label,
-                          description: p.value.length > 48 ? `${p.value.slice(0, 48)}…` : p.value,
-                          onSelect: () => setRow(m.id, { value: p.value }),
-                        }))}
-                        trigger={(props) => (
-                          <IconButton
-                            icon={ChevronDown}
-                            small
-                            label={`Common ${m.name} values`}
-                            {...props}
-                          />
-                        )}
-                      />
-                    )}
-                  </Cell>
-                  <Cell>
-                    <input
-                      class="input input--dense"
-                      aria-label="Comment"
-                      value={m.comment}
-                      title={m.comment}
-                      onInput={(e) => setRow(m.id, { comment: e.currentTarget.value })}
-                      onKeyDown={onEnter(() => addAfter(i))}
-                    />
-                  </Cell>
-                  <Cell>
-                    <IconButton
-                      icon={Trash2}
-                      small
-                      label={`Delete ${m.name || 'this row'}`}
-                      onClick={() => onChange(mods.filter((x) => x.id !== m.id))}
-                    />
-                  </Cell>
-                </RuleRow>
-              );
-            })}
+            {mods.map((m, i) => (
+              <HeaderRow
+                key={m.id}
+                mod={m}
+                index={i}
+                issues={issues.get(m.id)}
+                listId={listId}
+                setRow={setRow}
+                addAfter={addAfter}
+                remove={remove}
+              />
+            ))}
           </RuleTable>
           <div class="panel__actions">
             <Button small icon={Plus} onClick={() => addAfter(mods.length - 1)}>

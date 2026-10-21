@@ -2,12 +2,14 @@
  * Site-access flow (ARCHITECTURE.md "Permissions flow"). Chrome applies header and redirect rules
  * only with host access to both the request URL and the page that sends it (the initiator), so
  * turning a profile on asks for the sites it changes plus, in the popup, the page it is opened on.
+ * Page and iframe loads are the exception: Chrome needs no initiator access for them, so a profile
+ * that only changes those does not ask for the page.
  * A profile that is on but lacks access to its sites is "needed" until the user grants it; a
- * refused request makes it "denied" ("Blocked by Chrome"), with a retry.
+ * refused or dismissed request makes it "denied" ("Site access not granted"), with a retry.
  * `chrome.permissions.request` must run inside the click.
  */
 import type { Profile } from '@headerbench/core';
-import { ALL_ORIGINS, originsFor } from '@headerbench/core';
+import { ALL_ORIGINS, needsInitiatorAccess, originsFor } from '@headerbench/core';
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { originsLabel } from './format';
 import type { Platform } from './platform';
@@ -34,10 +36,22 @@ export async function requestAccess(platform: Platform, origins: string[]): Prom
   }
 }
 
+/**
+ * Whether Chrome also needs access to the page that sends this profile's requests: true unless
+ * its only rules are header changes limited to page and iframe loads. Redirects and mocks match
+ * every request type.
+ */
+export function needsPageAccess(profile: Profile): boolean {
+  if (originsFor(profile).length === 0) return false;
+  if (profile.redirects.some((r) => r.enabled) || profile.mocks.some((m) => m.enabled)) return true;
+  return profile.resourceTypes.length === 0 || profile.resourceTypes.some(needsInitiatorAccess);
+}
+
 /** The sites a profile changes plus the page it is used on, as one permission request. */
 export function originsToRequest(profile: Profile, page: string | null): string[] {
   const origins = originsFor(profile);
   if (origins.length === 0 || page === null || origins.includes(page)) return origins;
+  if (!needsPageAccess(profile)) return origins;
   if (ALL_ORIGINS.every((o) => origins.includes(o))) return origins;
   return [...origins, page];
 }

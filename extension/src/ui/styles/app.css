@@ -605,6 +605,10 @@ body.page-app {
   color: var(--success);
 }
 
+.match--unknown .match__icon {
+  color: var(--accent-text);
+}
+
 .match__action {
   font-weight: 500;
 }

@@ -1,4 +1,8 @@
-/** Asks Chrome's own RE2 engine whether a regex is usable, after local checks pass. */
+/**
+ * Asks Chrome's RE2 engine (isRegexSupported) about a regex, only once core's `checkRegex` accepts
+ * it. Core is authoritative first: Chrome says yes to non-ASCII patterns it then refuses to install,
+ * and core's message for those is shown with the row's other issues.
+ */
 import { checkRegex } from '@headerbench/core';
 import { useEffect, useState } from 'preact/hooks';
 import type { Platform } from '../platform';

@@ -1,6 +1,6 @@
 /** Inline messages per row: local validation plus the service worker's compile warnings. */
 import type { Profile, Warning } from '@headerbench/core';
-import { profileIssues } from '@headerbench/core';
+import { fragileRequestHeaderWarning, profileIssues } from '@headerbench/core';
 
 export interface RowIssue {
   tone: 'error' | 'warning';
@@ -33,6 +33,11 @@ export function rowIssues(profile: Profile, warnings: readonly Warning[]): Issue
   };
   for (const issue of profileIssues(profile)) {
     add(issue.itemId, { tone: 'error', message: issue.message });
+  }
+  // The compiler warns about these too, but only after the save; say it while typing.
+  for (const mod of profile.requestHeaders) {
+    const fragile = mod.op === 'remove' ? null : fragileRequestHeaderWarning(mod.name);
+    if (fragile) add(mod.id, { tone: 'warning', message: fragile });
   }
   for (const w of warnings) {
     if (w.profileId !== profile.id || !fromCompilerOnly(w)) continue;

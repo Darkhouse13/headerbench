@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SCHEMA_VERSION, defaultState, migrate, tryMigrate } from '../src/index.js';
+import { MIGRATIONS, SCHEMA_VERSION, defaultState, migrate, tryMigrate } from '../src/index.js';
 import { header, profile, stateWith } from './helpers.js';
 
 const NOW = 1_760_000_000_000;
@@ -122,5 +122,28 @@ describe('migrate', () => {
 
   it('turns an empty object into the default state', () => {
     expect(migrate({}, NOW)).toEqual(defaultState());
+  });
+
+  it('has a ladder step for every version below the current one', () => {
+    for (let v = 0; v < SCHEMA_VERSION; v++) expect(typeof MIGRATIONS[v], `v${v}`).toBe('function');
+    expect(MIGRATIONS[SCHEMA_VERSION]).toBeUndefined();
+  });
+
+  it('leaves data from a newer Headerbench untouched, so the caller can keep it', () => {
+    const newer = { schemaVersion: SCHEMA_VERSION + 1, profiles: [{ id: 'x', future: true }] };
+    const copy = structuredClone(newer);
+    expect(tryMigrate(newer, NOW)).toEqual({ ok: false, reason: 'newer_schema' });
+    expect(newer).toEqual(copy);
+    expect(tryMigrate({ schemaVersion: SCHEMA_VERSION + 0.5 }, NOW)).toMatchObject({
+      reason: 'newer_schema',
+    });
+  });
+
+  it('treats a missing or negative version as v0', () => {
+    const p = profile('Old');
+    expect(tryMigrate({ schemaVersion: -3, profiles: [p] }, NOW)).toMatchObject({
+      ok: true,
+      state: { schemaVersion: SCHEMA_VERSION, profiles: [p] },
+    });
   });
 });

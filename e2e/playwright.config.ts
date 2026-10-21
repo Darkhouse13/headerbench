@@ -6,7 +6,8 @@ import { defineConfig } from '@playwright/test';
  */
 export default defineConfig({
   testDir: '.',
-  testMatch: ['specs/**/*.spec.ts', 'screenshots.spec.ts'],
+  // Store and site screenshots rewrite tracked images, so they run only via `npm run screenshots`.
+  testMatch: process.env.HB_SCREENSHOTS ? ['screenshots.spec.ts'] : ['specs/**/*.spec.ts'],
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: true,

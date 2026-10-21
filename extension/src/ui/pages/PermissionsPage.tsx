@@ -11,7 +11,7 @@ const PERMISSION_REASONS: Record<string, string> = {
     "Applies your header, redirect and block rules through Chrome's own rule engine, only to requests between the sites listed above.",
   storage: 'Saves your profiles and settings in this browser.',
   activeTab: 'Shows what applied on the tab you open Headerbench on, only at that moment.',
-  alarms: 'Turns profiles off when their auto-pause time comes.',
+  alarms: 'Turns profiles off at their auto-pause time and renews a yearly licence on time.',
   declarativeNetRequestFeedback:
     'Reads which rules matched. Test builds only; the store version does not ask for it.',
 };
@@ -48,9 +48,8 @@ export function PermissionsPage() {
       <header class="page__head">
         <h1>Permissions</h1>
         <p class="muted">
-          Chrome lets Headerbench change a request only when both the site it goes to and the page
-          that sends it are listed below. You granted each one when you turned on a profile or used
-          the popup on a page, and you can take any of them back.
+          Chrome lets Headerbench change a request only when its site is listed below; requests a
+          page sends itself, like fetch calls, also need that page. Revoke any site here.
         </p>
       </header>
 
@@ -116,9 +115,9 @@ export function PermissionsPage() {
       <section class="card card__section privacy">
         <ShieldCheck class="icon" size={20} aria-hidden="true" />
         <p>
-          Headerbench reads no page content, has no analytics and loads no remote code. Its only
-          network request renews a Pro licence when you click Refresh, or when an open Headerbench
-          page sees the licence is about to expire.
+          No page content is read, no analytics are sent and no remote code is loaded. The only
+          network request renews a yearly Pro licence in its last 14 days (in the background, at
+          most every six hours) or when you click Refresh, and it carries only the key.
         </p>
       </section>
     </div>

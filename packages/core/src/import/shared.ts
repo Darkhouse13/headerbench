@@ -6,28 +6,83 @@ import type { ReportBuilder } from './report.js';
 
 export const DYNAMIC_VALUE = /^\s*(async\s+)?function\s*\(/;
 
+export interface SimpleFilter {
+  kind: 'domain' | 'urlFilter';
+  value: string;
+  /** What the filter now matches, for the import report. */
+  description: string;
+}
+
 /**
- * Turns a simple ModHeader host regex such as `.*://api\.example\.com/.*` into a domain filter,
- * so the profile only needs access to that site instead of all sites. Returns null if the regex
- * is anything more than "this host, any path".
+ * Turns a simple ModHeader host regex into a narrower filter, so the profile only needs access to
+ * that site instead of all sites:
+ * - `.*://api\.example\.com/.*` (any scheme, no port) → domain `api.example.com`
+ * - `https?://localhost:3000/.*` (any scheme, a port) → urlFilter `||localhost:3000/`
+ * - `^https://api\.example\.com(:8443)?/.*` (one scheme) → urlFilter `|https://api.example.com/`
+ * - `^https://api\.example\.com/$` (one scheme, `$` right after the host's `/`) → urlFilter
+ *   `|https://api.example.com/|`, which matches that exact address and nothing below it
+ * Returns null if the regex is anything more than "this host (and port), any path" or "this
+ * site's root address", or if the conversion would match more than the regex: subdomains of a
+ * single-scheme host, a root address for any scheme or with subdomains, and a host with `$` but
+ * no path (no URL matches that, since Chrome always gives one).
  */
-export function regexToDomain(regex: string): string | null {
-  let rest = regex.replace(/^\^/, '').replace(/\$$/, '');
+export function regexToFilter(regex: string): SimpleFilter | null {
+  let rest = regex.replace(/^\^/, '');
+  // An unescaped trailing `$`; it only narrows the match when the path before it is fixed.
+  const endAnchored = /(?:^|[^\\])(?:\\\\)*\$$/.test(rest);
+  if (endAnchored) rest = rest.slice(0, -1);
   const scheme =
-    /^(?:\.\*|https\?|https|http|\(https\?\)|\(https\|http\)|\(http\|https\))?(?::\\\/\\\/|:\/\/)/.exec(
+    /^(\.\*|https\?|https|http|\(https\?\)|\(https\|http\)|\(http\|https\))?(?::\\\/\\\/|:\/\/)/.exec(
       rest,
     );
   if (!scheme) return null;
   rest = rest.slice(scheme[0].length);
-  rest = rest.replace(/^(?:\.\*\\\.|\(\.\*\\\.\)\?)/, '');
-  const host = /^[a-z0-9-]+(?:(?:\\\.|\.)[a-z0-9-]+)*/i.exec(rest);
+  const fixedScheme = scheme[1] === 'https' || scheme[1] === 'http' ? scheme[1] : null;
+  const subdomains = /^(?:\.\*\\\.|\(\.\*\\\.\)\?)/.exec(rest);
+  if (subdomains) rest = rest.slice(subdomains[0].length);
+  const hostMatch = /^[a-z0-9-]+(?:(?:\\\.|\.)[a-z0-9-]+)*/i.exec(rest);
+  if (!hostMatch) return null;
+  const tail = /^(?::(\d+))?(\\?\/\.\*|\\?\/|\.\*)?$/.exec(rest.slice(hostMatch[0].length));
+  if (!tail) return null;
+  const host = normalizeDomain(hostMatch[0].replace(/\\\./g, '.'));
   if (!host) return null;
-  const tail = rest.slice(host[0].length);
-  if (!/^(?::\d+)?(?:\\?\/\.\*|\\?\/|\.\*)?$/.test(tail)) return null;
-  return normalizeDomain(host[0].replace(/\\\./g, '.'));
+  const port = tail[1];
+  const path = tail[2];
+  if (endAnchored && !path?.endsWith('.*')) {
+    if (path === undefined || fixedScheme === null || subdomains) return null;
+    const value = `|${fixedScheme}://${host}${port === undefined ? '' : `:${port}`}/|`;
+    return {
+      kind: 'urlFilter',
+      value,
+      description: `the URL filter ${value} (only that exact address)`,
+    };
+  }
+  if (fixedScheme === null && port === undefined) {
+    return {
+      kind: 'domain',
+      value: host,
+      description: `the domain filter ${host} (it also covers subdomains)`,
+    };
+  }
+  if (fixedScheme === null) {
+    const value = `||${host}:${port}/`;
+    return {
+      kind: 'urlFilter',
+      value,
+      description: `the URL filter ${value} (port ${port} only, any scheme, also subdomains)`,
+    };
+  }
+  // `|https://host/` cannot also cover subdomains without a wildcard that matches far more.
+  if (subdomains) return null;
+  const value = `|${fixedScheme}://${host}${port === undefined ? '' : `:${port}`}/`;
+  return {
+    kind: 'urlFilter',
+    value,
+    description: `the URL filter ${value} (${fixedScheme} only${port === undefined ? '' : `, port ${port} only`})`,
+  };
 }
 
-/** A regex include/exclude filter, converted to a domain filter when the regex is that simple. */
+/** A regex include/exclude filter, converted to a domain or URL filter when the regex is that simple. */
 export function regexFilter(
   regex: string,
   enabled: boolean,
@@ -35,13 +90,13 @@ export function regexFilter(
   profile: string,
   report: ReportBuilder,
 ): UrlFilter {
-  const domain = regexToDomain(regex);
-  if (domain) {
+  const simple = regexToFilter(regex);
+  if (simple) {
     report.info(
       profile,
-      `Filter ${regex} became the domain filter ${domain} (it also covers subdomains), so Headerbench asks for access to that site instead of every site.`,
+      `Filter ${regex} became ${simple.description}, so Headerbench asks for access to that site instead of every site.`,
     );
-    return { id: newId(), enabled, kind: 'domain', value: domain, exclude };
+    return { id: newId(), enabled, kind: simple.kind, value: simple.value, exclude };
   }
   return { id: newId(), enabled, kind: 'regex', value: regex, exclude };
 }
@@ -132,9 +187,22 @@ export function hexColor(value: unknown): string | null {
   return short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}` : null;
 }
 
-/** ModHeader's `appendMode`: `true` (older exports) or `"comma"` mean append; anything else sets. */
-export function isAppendMode(value: unknown): boolean {
-  return value === true || value === 'comma';
+/** `appendMode` values that mean "replace the value", which ModHeader writes for its default. */
+const SET_MODES: readonly unknown[] = [undefined, null, false, '', 'false'];
+
+/**
+ * ModHeader's `appendMode`: `true` (older exports) or `"comma"` mean append; the default values
+ * mean set. Any other value is imported as set, with an info line in the report.
+ */
+export function isAppendMode(value: unknown, profile: string, report: ReportBuilder): boolean {
+  if (value === true || value === 'comma') return true;
+  if (!SET_MODES.includes(value)) {
+    report.infoOnce(
+      profile,
+      `appendMode ${JSON.stringify(value) ?? String(value)} is not one Headerbench knows, so those headers replace the value instead of appending to it.`,
+    );
+  }
+  return false;
 }
 
 export function asString(value: unknown): string {

@@ -755,6 +755,27 @@
   color: #ffffff;
 }
 
+.toast__action {
+  margin: -6px calc(-1 * var(--s2)) -6px 0;
+  padding: 6px var(--s2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #8ab4f8;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.toast__action:hover {
+  background: rgb(255 255 255 / 8%);
+}
+
+.toast__action:focus-visible {
+  outline: 2px solid #8ab4f8;
+  outline-offset: 1px;
+}
+
 /* ---------- list rows ---------- */
 
 .kv {

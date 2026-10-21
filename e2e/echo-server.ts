@@ -12,12 +12,15 @@
  * - `/pixel.png`         1x1 PNG (for image requests)
  * - `/activate`          HTML that sends `activate-license` to the extension id in `?ext=`
  * - `/dev`               a plain developer dashboard, used as the page behind the popup screenshot
+ * - `/api/license/refresh`  POST `{ key }` → `{ key }`: the same licence re-signed with the dev key
+ *                        and a later expiry, as the licence server does for an active subscription
  *
  * Every request may carry `?tag=<id>`; `waitFor(tag)` resolves with the recorded request.
  */
 import { createServer } from 'node:http';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { renewLicense } from './support/license.ts';
 
 export interface RecordedRequest {
   method: string;
@@ -157,6 +160,22 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+/** The licence server's refresh endpoint, backed by the dev key pair. */
+function refreshLicense(res: ServerResponse, method: string, body: string): void {
+  const fail = (status: number, message: string): void =>
+    send(res, status, 'application/json', JSON.stringify({ reason: 'invalid', message }));
+  if (method !== 'POST') return fail(405, 'Use POST.');
+  let key: unknown = null;
+  try {
+    key = (JSON.parse(body) as { key?: unknown }).key;
+  } catch {
+    return fail(400, 'The body is not JSON.');
+  }
+  const renewed = typeof key === 'string' ? renewLicense(key) : null;
+  if (!renewed) return fail(400, 'Not a licence key signed with the dev key.');
+  send(res, 200, 'application/json', JSON.stringify({ key: renewed }));
+}
+
 function send(
   res: ServerResponse,
   status: number,
@@ -216,6 +235,8 @@ export async function startEchoServer(): Promise<EchoServer> {
         send(res, 200, 'text/html; charset=utf-8', ACTIVATE_PAGE);
       } else if (path === '/dev') {
         send(res, 200, 'text/html; charset=utf-8', DEV_PAGE);
+      } else if (path === '/api/license/refresh') {
+        refreshLicense(res, record.method, body);
       } else {
         send(res, 404, 'text/plain', 'not found');
       }

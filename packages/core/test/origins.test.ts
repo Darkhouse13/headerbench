@@ -131,7 +131,106 @@ describe('patternGrants / hostAccessFrom', () => {
   });
 });
 
+describe('IPv6, wildcard and port-qualified hosts', () => {
+  it('parses IPv6 literals instead of asking for every site', () => {
+    expect(urlFilterOrigins('|http://[::1]:3000/api')).toEqual(['http://[::1]/*']);
+    expect(urlFilterOrigins('*://[::1]/')).toEqual(['https://[::1]/*', 'http://[::1]/*']);
+    expect(urlFilterOrigins('||[::1]:8080/')).toEqual(['https://[::1]/*', 'http://[::1]/*']);
+    expect(urlFilterOrigins('|http://[0:0:0:0:0:0:0:1]/')).toEqual(['http://[::1]/*']);
+    expect(urlFilterOrigins('|http://[nope]/')).toBeNull();
+  });
+
+  it('parses wildcard hosts', () => {
+    expect(urlFilterOrigins('|https://*.Example.com/api/')).toEqual(['https://*.example.com/*']);
+    expect(urlFilterOrigins('*://*.example.com/')).toEqual([
+      'https://*.example.com/*',
+      'http://*.example.com/*',
+    ]);
+    expect(urlFilterOrigins('https://*/x')).toEqual(['https://*/*']);
+    expect(urlFilterOrigins('https://*example.com/')).toBeNull();
+  });
+
+  it('gives IP literals no subdomain pattern', () => {
+    expect(originsFor(withHeaders([filter('domain', '127.0.0.1')]))).toEqual([
+      'http://127.0.0.1/*',
+      'https://127.0.0.1/*',
+    ]);
+    expect(urlFilterOrigins('||127.0.0.1:5173/')).toEqual([
+      'https://127.0.0.1/*',
+      'http://127.0.0.1/*',
+    ]);
+  });
+
+  it('asks for the narrow host of port-qualified url filters', () => {
+    expect(urlFilterOrigins('||localhost:3000/')).toEqual([
+      'https://localhost/*',
+      'http://localhost/*',
+      'https://*.localhost/*',
+      'http://*.localhost/*',
+    ]);
+    expect(urlFilterOrigins('|https://api.example.com:8443/')).toEqual([
+      'https://api.example.com/*',
+    ]);
+  });
+
+  it('gives the page origin of an IPv6 page', () => {
+    expect(pageOrigin('http://[::1]:5173/app')).toBe('http://[::1]/*');
+  });
+
+  it('honours ports and IPv6 hosts in granted patterns', () => {
+    expect(patternGrants('http://localhost:3000/*', 'http://localhost:3000/x')).toBe(true);
+    expect(patternGrants('http://localhost:3000/*', 'http://localhost:3001/x')).toBe(false);
+    expect(patternGrants('http://localhost:3000/*', 'http://localhost/x')).toBe(false);
+    expect(patternGrants('http://localhost:80/*', 'http://localhost/x')).toBe(true);
+    expect(patternGrants('https://example.com:443/*', 'https://example.com/')).toBe(true);
+    expect(patternGrants('http://localhost:*/*', 'http://localhost:9999/')).toBe(true);
+    expect(patternGrants('http://localhost/*', 'http://localhost:9999/')).toBe(true);
+    expect(patternGrants('http://[::1]/*', 'http://[::1]:3000/')).toBe(true);
+    expect(patternGrants('http://[::1]:3000/*', 'http://[::1]:3000/')).toBe(true);
+    expect(patternGrants('http://[::1]:3000/*', 'http://[::1]:4000/')).toBe(false);
+    expect(patternGrants('http://[::1]/*', 'http://127.0.0.1/')).toBe(false);
+    expect(hostAccessFrom(['http://localhost:5173/*'])('http://localhost:5173/app')).toBe(true);
+  });
+});
+
+/**
+ * Chrome's containment rule for permissions.request: a requested pattern is granted only if one
+ * manifest entry contains it (same or `*` scheme, host equal or covered by `*` / `*.domain`).
+ */
+function contains(entry: string, requested: string): boolean {
+  const parse = (p: string) => /^(\*|https?):\/\/([^/]+)\/(.*)$/.exec(p);
+  const e = parse(entry);
+  const r = parse(requested);
+  if (!e || !r) return false;
+  if (e[1] !== '*' && e[1] !== r[1]) return false;
+  if (e[1] !== '*' && r[1] === '*') return false;
+  const eh = e[2] as string;
+  const rh = r[2] as string;
+  if (eh === '*') return true;
+  if (eh.startsWith('*.')) return rh === eh || rh.endsWith(eh.slice(1)) || rh === eh.slice(2);
+  return eh === rh;
+}
+
 describe('manifest compatibility', () => {
+  it('only asks for patterns a single optional_host_permissions entry contains', () => {
+    const p = withHeaders([
+      filter('domain', 'example.com'),
+      filter('domain', '127.0.0.1'),
+      filter('urlFilter', '|http://[::1]:3000/'),
+      filter('urlFilter', '*://*.example.org/'),
+      filter('urlFilter', '||localhost:3000/'),
+      filter('urlFilter', '|https://api.example.net:8443/'),
+    ]);
+    const origins = originsFor(p);
+    expect(origins).not.toEqual([...ALL_ORIGINS]);
+    for (const o of origins) {
+      expect(
+        ALL_ORIGINS.some((entry) => contains(entry, o)),
+        o,
+      ).toBe(true);
+    }
+  });
+
   // Chrome grants a requested pattern only if one optional_host_permissions entry contains it.
   it('never asks for a *:// pattern, which no single https:// or http:// entry contains', () => {
     const p = withHeaders([filter('domain', 'httpbin.org'), filter('urlFilter', '*://x.test/v1')]);

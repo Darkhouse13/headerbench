@@ -25,8 +25,10 @@ test('imports a ModHeader file through the dialog and applies its headers', asyn
 
   // Turning it on from the editor. The regex filter needs all-sites access, which the E2E build
   // does not have, so the editor asks for it; Chrome still applies the rules on localhost.
-  await sidebar.getByRole('switch', { name: 'Turn on Local API' }).click();
-  await expect(sidebar.getByRole('switch', { name: 'Turn off Local API' })).toBeVisible();
+  const toggle = sidebar.getByRole('switch', { name: 'Local API' });
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'true');
 
   const snap = await ext.snapshot();
   const imported = snap.state.profiles.find((p) => p.name === 'Local API');

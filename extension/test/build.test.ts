@@ -1,6 +1,8 @@
 import { DEV_LICENSE_PUBLIC_KEY } from '@headerbench/core';
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readBuildEnv } from '../tooling/env';
 import { buildManifest } from '../tooling/manifest';
@@ -80,6 +82,7 @@ describe('store packaging guard', () => {
   };
   const packageScript = resolve(__dirname, '../scripts/package.mjs');
   const checkScript = resolve(__dirname, '../../scripts/check-manifest.mjs');
+  const releaseKeyScript = resolve(__dirname, '../../scripts/release-key.mjs');
 
   it('refuses to package without a production licence key, before building', () => {
     for (const key of [undefined, '', DEV_LICENSE_PUBLIC_KEY]) {
@@ -88,6 +91,71 @@ describe('store packaging guard', () => {
       expect(result.stderr).toMatch(/HB_LICENSE_PUBLIC_KEY/);
       expect(result.stderr).toMatch(/node scripts\/gen-license-key\.mjs.*DEPLOY\.md §1/);
       expect(result.stdout).not.toMatch(/built in/);
+    }
+  });
+
+  it('refuses a key other than the production one unless told to', () => {
+    const other = 'ab'.repeat(32);
+    const result = run(packageScript, [], other);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/not the production key \(666897a8…\).*--allow-other-key/);
+    expect(result.stdout).not.toMatch(/built in/);
+    const check = run(checkScript, [], other);
+    expect(check.status).toBe(1);
+    expect(check.stderr).toMatch(/not the production key/);
+  });
+
+  it('refuses unknown options', () => {
+    const result = run(packageScript, ['--allow-dirt'], 'ab'.repeat(32));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/unknown option --allow-dirt/);
+  });
+
+  it('checks a built folder: manifest, API base and licence key', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-dist-'));
+    const key = 'cd'.repeat(32);
+    const good = buildManifest({
+      version: '1.0.3',
+      e2e: false,
+      apiBase: 'https://headerbench.com',
+    });
+    const problemsFor = (manifest: object, code: string): string[] => {
+      writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
+      writeFileSync(join(dir, 'sw.js'), code);
+      const out = spawnSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          `import { distProblems } from ${JSON.stringify(releaseKeyScript)};
+           process.stdout.write(JSON.stringify(distProblems(process.argv[1], process.argv[2])));`,
+          dir,
+          key,
+        ],
+        { encoding: 'utf8' },
+      );
+      return JSON.parse(out.stdout) as string[];
+    };
+    const bundle = (base: string, k: string) =>
+      `var LICENSE_PUBLIC_KEY = "${k}";\nvar API_BASE = "${base}";\n`;
+    try {
+      expect(problemsFor(good, bundle('https://headerbench.com', key))).toEqual([]);
+      const local = buildManifest({
+        version: '1.0.3',
+        e2e: true,
+        apiBase: 'http://localhost:3000',
+      });
+      const problems = problemsFor(local, bundle('http://localhost:3000', DEV_LICENSE_PUBLIC_KEY));
+      expect(problems).toEqual([
+        expect.stringMatching(/^host_permissions must be absent/),
+        'permission "declarativeNetRequestFeedback" must not be requested',
+        expect.stringMatching(/^externally_connectable\.matches must be exactly/),
+        'the built extension contains the development licence public key',
+        'the built extension does not contain HB_LICENSE_PUBLIC_KEY (stale build?)',
+        'the built extension talks to http://localhost:3000 instead of https://headerbench.com',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

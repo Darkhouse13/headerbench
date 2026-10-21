@@ -190,6 +190,23 @@ exports[`compile: rule kinds > compiles blocks and redirects with their own patt
   {
     "action": {
       "redirect": {
+        "url": "http://localhost:3000/app.js",
+      },
+      "type": "redirect",
+    },
+    "condition": {
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+      ],
+      "urlFilter": "|https://cdn.example.com/app.js#",
+    },
+    "id": 4,
+    "priority": 13,
+  },
+  {
+    "action": {
+      "redirect": {
         "url": "https://new.example.com/api/",
       },
       "type": "redirect",
@@ -214,7 +231,7 @@ exports[`compile: rule kinds > compiles blocks and redirects with their own patt
       ],
       "urlFilter": "||old.example.com/api/",
     },
-    "id": 4,
+    "id": 5,
     "priority": 13,
   },
   {
@@ -244,7 +261,7 @@ exports[`compile: rule kinds > compiles blocks and redirects with their own patt
         "other",
       ],
     },
-    "id": 5,
+    "id": 6,
     "priority": 13,
   },
 ]

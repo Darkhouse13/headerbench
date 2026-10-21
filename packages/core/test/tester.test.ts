@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { hostAccessFrom, testUrl } from '../src/index.js';
+import {
+  MOCK_CSP_NOTE,
+  REGEX_PREVIEW_NOTE,
+  hostAccessFrom,
+  needsInitiatorAccess,
+  testUrl,
+} from '../src/index.js';
 import type { Match, TestRequest } from '../src/index.js';
 import {
   FREE,
@@ -299,9 +305,149 @@ describe('testUrl', () => {
   });
 
   it('returns nothing for invalid URLs or when the rule budget is exceeded', () => {
-    const filters = Array.from({ length: 4501 }, (_, i) => filter('domain', `h${i}.test`));
+    const filters = Array.from({ length: 4501 }, (_, i) => filter('urlFilter', `||h${i}.test^`));
     const state = stateWith([profile('P', { requestHeaders: [header('X-A', '1')], filters })]);
     expect(testUrl(state, FREE, xhr('https://h1.test/'))).toEqual([]);
     expect(testUrl(state, FREE, xhr('not a url'))).toEqual([]);
+  });
+
+  it('applies header and redirect rules to page and frame loads without initiator access', () => {
+    const p = profile('Staging', {
+      requestHeaders: [header('X-Debug', '1')],
+      redirects: [redirect('url', 'https://app.test/old', 'https://app.test/new')],
+    });
+    const state = stateWith([p]);
+    const granted = hostAccessFrom(['https://app.test/*']);
+    const from = {
+      initiator: 'https://other.test/page',
+      hasHostAccess: granted,
+      method: 'get' as const,
+    };
+    for (const resourceType of ['main_frame', 'sub_frame'] as const) {
+      expect(
+        testUrl(state, FREE, { url: 'https://app.test/old', resourceType, ...from }).map((m) => [
+          m.kind,
+          m.applied,
+        ]),
+      ).toEqual([
+        ['redirect', true],
+        ['headers', false],
+      ]);
+      expect(
+        testUrl(state, FREE, { url: 'https://app.test/x', resourceType, ...from }).map(
+          (m) => m.applied,
+        ),
+      ).toEqual([true]);
+    }
+    // A fetch from a page without access is still not modified.
+    expect(testUrl(state, FREE, xhr('https://app.test/x', from)).map((m) => m.reason)).toEqual([
+      'Chrome needs access to the page that sends this request (https://other.test).',
+    ]);
+    expect(needsInitiatorAccess('main_frame')).toBe(false);
+    expect(needsInitiatorAccess('sub_frame')).toBe(false);
+    expect(needsInitiatorAccess('script')).toBe(true);
+  });
+
+  it('redirects a page load with a #fragment, but matches subresources without it', () => {
+    const p = profile('P', {
+      redirects: [redirect('url', 'https://x.test/old', 'https://x.test/new')],
+    });
+    const state = stateWith([p]);
+    const page = (url: string) =>
+      testUrl(state, FREE, { url, resourceType: 'main_frame', method: 'get' });
+    expect(summary(page('https://x.test/old#top'))).toEqual([
+      'P: redirect https://x.test/new applied',
+    ]);
+    expect(summary(page('https://x.test/old'))).toEqual(['P: redirect https://x.test/new applied']);
+    expect(page('https://x.test/older#top')).toEqual([]);
+    // Chrome strips the fragment from subresource URLs before matching.
+    expect(summary(testUrl(state, FREE, xhr('https://x.test/old#top')))).toEqual([
+      'P: redirect https://x.test/new applied',
+    ]);
+    const anchored = profile('A', {
+      requestHeaders: [header('X-A', '1')],
+      filters: [filter('urlFilter', '|https://x.test/old|')],
+    });
+    expect(testUrl(stateWith([anchored]), FREE, xhr('https://x.test/old#top'))).toHaveLength(1);
+    expect(
+      testUrl(stateWith([anchored]), FREE, {
+        url: 'https://x.test/old#top',
+        resourceType: 'main_frame',
+        method: 'get',
+      }),
+    ).toEqual([]);
+  });
+
+  it('notes on every mock match that a page CSP can refuse it', () => {
+    const p = profile('P', { mocks: [mock('urlFilter', '||api.test/me', '{}')] });
+    const [m] = testUrl(stateWith([p]), PRO, xhr('https://api.test/me'));
+    expect(m).toMatchObject({ kind: 'mock', applied: true, notes: [MOCK_CSP_NOTE] });
+    expect(MOCK_CSP_NOTE).toMatch(/Remove Content Security Policy preset/);
+    const headers = profile('H', { requestHeaders: [header('X-A', '1')] });
+    expect(testUrl(stateWith([headers]), FREE, xhr('https://api.test/me'))[0]?.notes).toEqual([]);
+  });
+
+  it('simulates RE2-only syntax such as (?i), (?P<name>) and \\p{L}', () => {
+    const p = profile('P', {
+      requestHeaders: [header('X-A', '1')],
+      filters: [filter('regex', '(?-i)^https://x\\.test/(?P<word>\\p{L}+)$')],
+      redirects: [redirect('regex', '^https://r\\.test/(?P<path>.*)$', 'https://s.test/$1')],
+    });
+    const state = stateWith([p]);
+    expect(testUrl(state, PRO, xhr('https://x.test/abc'))).toHaveLength(1);
+    expect(testUrl(state, PRO, xhr('https://x.test/ABC'))).toHaveLength(1);
+    expect(testUrl(state, PRO, xhr('https://x.test/a1'))).toEqual([]);
+    expect(summary(testUrl(state, PRO, xhr('https://r.test/a/b')))).toEqual([
+      'P: redirect https://s.test/a/b applied',
+    ]);
+  });
+
+  it('says it cannot preview a regex JS cannot express, instead of guessing', () => {
+    const p = profile('P', {
+      requestHeaders: [header('X-A', '1')],
+      filters: [filter('regex', '^https://x\\.test/(?i)ADMIN')],
+      redirects: [redirect('regex', '^https://r\\.test/(?U)(.*)$', 'https://s.test/$1')],
+    });
+    const state = stateWith([p]);
+    // The redirect's regex can't run either, so it is listed as unknown for every URL.
+    const all = testUrl(state, PRO, xhr('https://x.test/admin'));
+    expect(all.map((m) => [m.kind, m.previewed])).toEqual([
+      ['redirect', false],
+      ['headers', false],
+    ]);
+    const headerMatch = all.filter((m) => m.kind === 'headers');
+    expect(headerMatch).toEqual([
+      expect.objectContaining({
+        kind: 'headers',
+        applied: false,
+        previewed: false,
+        reason: REGEX_PREVIEW_NOTE,
+        effect: expect.objectContaining({ header: 'X-A', operation: 'set', value: '1' }),
+      }),
+    ]);
+    const redirectMatch = testUrl(state, PRO, xhr('https://r.test/a')).find(
+      (m) => m.kind === 'redirect',
+    );
+    expect(redirectMatch).toMatchObject({
+      kind: 'redirect',
+      previewed: false,
+      reason: REGEX_PREVIEW_NOTE,
+      effect: { type: 'redirect', to: 'https://s.test/$1' },
+    });
+    // Non-regex conditions still rule it out.
+    const typed = profile('T', {
+      requestHeaders: [header('X-A', '1')],
+      filters: [filter('regex', 'a(?i)b')],
+      resourceTypes: ['script'],
+    });
+    expect(testUrl(stateWith([typed]), FREE, xhr('https://x.test/ab'))).toEqual([]);
+    // Rules the tester can evaluate are reported as usual.
+    expect(
+      testUrl(
+        stateWith([profile('Q', { requestHeaders: [header('X', '1')] })]),
+        FREE,
+        xhr('https://x.test/'),
+      )[0]?.previewed,
+    ).toBe(true);
   });
 });

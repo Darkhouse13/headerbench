@@ -1,6 +1,7 @@
 /**
- * Pure activation helpers. A profile has at most one activation, and activations are kept in
- * profile-list order: the list order is the priority order users see everywhere.
+ * Pure activation helpers. A profile is either on everywhere (one activation with `tabId: null`)
+ * or on in some tabs (one activation per tab). Activations are kept in profile-list order: the
+ * list order is the priority order users see everywhere.
  */
 import type { Activation, Profile, State } from '@headerbench/core';
 import { activeActivations } from '@headerbench/core';
@@ -18,20 +19,30 @@ export function sortActivations(state: State): State {
   return withActivations(state, sorted);
 }
 
+/**
+ * Turns a profile on. `tabId: null` makes it global and replaces all of its activations. A tab id
+ * adds (or updates) that tab without touching the profile's other tabs; if the profile was global,
+ * the tab activation replaces the global one.
+ */
 export function activate(
   state: State,
   profileId: string,
   tabId: number | null,
   pauseAt: number | null,
 ): State {
-  const others = state.settings.activations.filter((a) => a.profileId !== profileId);
-  return sortActivations(withActivations(state, [...others, { profileId, tabId, pauseAt }]));
+  const kept = state.settings.activations.filter(
+    (a) => a.profileId !== profileId || (tabId !== null && a.tabId !== null && a.tabId !== tabId),
+  );
+  return sortActivations(withActivations(state, [...kept, { profileId, tabId, pauseAt }]));
 }
 
-export function deactivate(state: State, profileId: string): State {
+/** Turns a profile off everywhere, or only in `tabId` when given. */
+export function deactivate(state: State, profileId: string, tabId?: number): State {
   return withActivations(
     state,
-    state.settings.activations.filter((a) => a.profileId !== profileId),
+    state.settings.activations.filter(
+      (a) => a.profileId !== profileId || (tabId !== undefined && a.tabId !== tabId),
+    ),
   );
 }
 
@@ -61,8 +72,9 @@ export function nextPauseAt(state: State, now: number): number | null {
   return times.length > 0 ? Math.min(...times) : null;
 }
 
-export function activationOf(state: State, profileId: string): Activation | null {
-  return state.settings.activations.find((a) => a.profileId === profileId) ?? null;
+/** A profile's activations: one global one, or one per tab it is scoped to. */
+export function activationsOf(state: State, profileId: string): Activation[] {
+  return state.settings.activations.filter((a) => a.profileId === profileId);
 }
 
 /** Profiles currently applying rules (not paused, not expired), in priority order. */

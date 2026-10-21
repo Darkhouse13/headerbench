@@ -1,11 +1,11 @@
 import type { BlockRule, Profile, ProStatus, RedirectRule } from '@headerbench/core';
-import { newId } from '@headerbench/core';
+import { checkRegex, checkRegexSubstitution, newId, toRegexSubstitution } from '@headerbench/core';
 import { ArrowRight, Ban, Plus, Trash2, Waypoints } from 'lucide-preact';
 import { Banner, Button, EmptyState, IconButton, Issue, Switch } from '../components/controls';
 import { useStore } from '../context';
 import { proGate } from '../pro';
-import type { IssueMap } from './issues';
-import { Cell, RuleRow, RuleTable, onEnter, shown, useFocusRow } from './table';
+import type { IssueMap, RowIssue } from './issues';
+import { Cell, RuleRow, RuleTable, onEnter, memoRow, shown, useFocusRow, useStable } from './table';
 import { useRegexCheck } from './useRegexCheck';
 
 const REDIRECT_TEMPLATE =
@@ -45,15 +45,179 @@ function PatternInput(props: {
   );
 }
 
+/** For a regex redirect with a valid pattern: why Chrome would refuse its `$N` target. */
+function targetProblem(rule: RedirectRule): string | null {
+  if (rule.kind !== 'regex' || rule.to.trim() === '' || checkRegex(rule.from) !== null) return null;
+  return checkRegexSubstitution(rule.from, toRegexSubstitution(rule.to));
+}
+
+interface RedirectRowProps {
+  rule: RedirectRule;
+  index: number;
+  issues: readonly RowIssue[] | undefined;
+  setRow: (id: string, patch: Partial<RedirectRule>) => void;
+  addAfter: (index: number) => void;
+  remove: (id: string) => void;
+}
+
+const RedirectRow = memoRow(function RedirectRow({
+  rule: r,
+  index,
+  issues,
+  setRow,
+  addAfter,
+  remove,
+}: RedirectRowProps) {
+  const target = targetProblem(r);
+  // The target's own problem is shown under the target field instead of under the row.
+  const rowIssues = shown(issues, r.from === '' && r.to === '').filter((i) => i.message !== target);
+  const add = onEnter(() => addAfter(index));
+  return (
+    <RuleRow id={r.id} enabled={r.enabled} issues={rowIssues}>
+      <Cell>
+        <Switch
+          small
+          checked={r.enabled}
+          label={r.from.trim() || 'Unnamed redirect'}
+          onChange={(enabled) => setRow(r.id, { enabled })}
+        />
+      </Cell>
+      <Cell>
+        <select
+          class="select select--dense"
+          aria-label="Match type"
+          value={r.kind}
+          onChange={(e) => setRow(r.id, { kind: e.currentTarget.value as RedirectRule['kind'] })}
+        >
+          <option value="url">Exact URL</option>
+          <option value="urlFilter">URL pattern</option>
+          <option value="regex">Regex (Pro)</option>
+        </select>
+      </Cell>
+      <Cell>
+        <PatternInput
+          label="Redirect from"
+          value={r.from}
+          regex={r.kind === 'regex'}
+          onInput={(from) => setRow(r.id, { from })}
+          onKeyDown={add}
+        />
+      </Cell>
+      <Cell class="rtable__cell--arrow">
+        <ArrowRight class="icon" size={16} aria-hidden="true" />
+      </Cell>
+      <Cell>
+        <div class="stack stack--tight">
+          <input
+            class="input input--dense mono"
+            aria-label="Redirect to"
+            spellcheck={false}
+            autocomplete="off"
+            value={r.to}
+            onInput={(e) => setRow(r.id, { to: e.currentTarget.value })}
+            onKeyDown={add}
+          />
+          {target && <Issue tone="error">{target}</Issue>}
+        </div>
+      </Cell>
+      <Cell>
+        <input
+          class="input input--dense"
+          aria-label="Comment"
+          value={r.comment}
+          onInput={(e) => setRow(r.id, { comment: e.currentTarget.value })}
+        />
+      </Cell>
+      <Cell>
+        <IconButton
+          icon={Trash2}
+          small
+          label={`Delete redirect ${r.from}`}
+          onClick={() => remove(r.id)}
+        />
+      </Cell>
+    </RuleRow>
+  );
+});
+
+interface BlockRowProps {
+  rule: BlockRule;
+  index: number;
+  issues: readonly RowIssue[] | undefined;
+  setRow: (id: string, patch: Partial<BlockRule>) => void;
+  addAfter: (index: number) => void;
+  remove: (id: string) => void;
+}
+
+const BlockRow = memoRow(function BlockRow({
+  rule: b,
+  index,
+  issues,
+  setRow,
+  addAfter,
+  remove,
+}: BlockRowProps) {
+  return (
+    <RuleRow id={b.id} enabled={b.enabled} issues={shown(issues, b.pattern === '')}>
+      <Cell>
+        <Switch
+          small
+          checked={b.enabled}
+          label={b.pattern.trim() || 'Unnamed block'}
+          onChange={(enabled) => setRow(b.id, { enabled })}
+        />
+      </Cell>
+      <Cell>
+        <select
+          class="select select--dense"
+          aria-label="Match type"
+          value={b.kind}
+          onChange={(e) => setRow(b.id, { kind: e.currentTarget.value as BlockRule['kind'] })}
+        >
+          <option value="urlFilter">URL pattern</option>
+          <option value="regex">Regex</option>
+        </select>
+      </Cell>
+      <Cell>
+        <PatternInput
+          label="Block pattern"
+          value={b.pattern}
+          regex={b.kind === 'regex'}
+          onInput={(pattern) => setRow(b.id, { pattern })}
+          onKeyDown={onEnter(() => addAfter(index))}
+        />
+      </Cell>
+      <Cell>
+        <input
+          class="input input--dense"
+          aria-label="Comment"
+          value={b.comment}
+          onInput={(e) => setRow(b.id, { comment: e.currentTarget.value })}
+        />
+      </Cell>
+      <Cell>
+        <IconButton
+          icon={Trash2}
+          small
+          label={`Delete block ${b.pattern}`}
+          onClick={() => remove(b.id)}
+        />
+      </Cell>
+    </RuleRow>
+  );
+});
+
 export function RedirectsTab({ profile, issues, pro, onChange, onGetPro }: Props) {
   const { platform } = useStore();
   const focusRow = useFocusRow();
   const { redirects, blocks } = profile;
-  const setRedirect = (id: string, patch: Partial<RedirectRule>): void =>
-    onChange({ redirects: redirects.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
-  const setBlock = (id: string, patch: Partial<BlockRule>): void =>
-    onChange({ blocks: blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)) });
-  const addRedirect = (index: number): void => {
+  const setRedirect = useStable((id: string, patch: Partial<RedirectRule>): void =>
+    onChange({ redirects: redirects.map((r) => (r.id === id ? { ...r, ...patch } : r)) }),
+  );
+  const setBlock = useStable((id: string, patch: Partial<BlockRule>): void =>
+    onChange({ blocks: blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)) }),
+  );
+  const addRedirect = useStable((index: number): void => {
     const row: RedirectRule = {
       id: newId(),
       enabled: true,
@@ -66,8 +230,8 @@ export function RedirectsTab({ profile, issues, pro, onChange, onGetPro }: Props
     next.splice(index + 1, 0, row);
     onChange({ redirects: next });
     focusRow(row.id);
-  };
-  const addBlock = (index: number): void => {
+  });
+  const addBlock = useStable((index: number): void => {
     const row: BlockRule = {
       id: newId(),
       enabled: true,
@@ -79,7 +243,13 @@ export function RedirectsTab({ profile, issues, pro, onChange, onGetPro }: Props
     next.splice(index + 1, 0, row);
     onChange({ blocks: next });
     focusRow(row.id);
-  };
+  });
+  const removeRedirect = useStable((id: string): void =>
+    onChange({ redirects: redirects.filter((x) => x.id !== id) }),
+  );
+  const removeBlock = useStable((id: string): void =>
+    onChange({ blocks: blocks.filter((x) => x.id !== id) }),
+  );
   const usesRegex = redirects.some((r) => r.kind === 'regex');
   const gate = usesRegex ? proGate(pro, platform.now(), 'Regex redirects') : null;
 
@@ -124,76 +294,15 @@ export function RedirectsTab({ profile, issues, pro, onChange, onGetPro }: Props
               columns={['On', 'Match', 'From', '', 'To', 'Comment', '']}
             >
               {redirects.map((r, i) => (
-                <RuleRow
+                <RedirectRow
                   key={r.id}
-                  id={r.id}
-                  enabled={r.enabled}
-                  issues={shown(issues.get(r.id), r.from === '' && r.to === '')}
-                >
-                  <Cell>
-                    <Switch
-                      small
-                      checked={r.enabled}
-                      label={`${r.enabled ? 'Turn off' : 'Turn on'} redirect ${r.from}`}
-                      onChange={(enabled) => setRedirect(r.id, { enabled })}
-                    />
-                  </Cell>
-                  <Cell>
-                    <select
-                      class="select select--dense"
-                      aria-label="Match type"
-                      value={r.kind}
-                      onChange={(e) =>
-                        setRedirect(r.id, { kind: e.currentTarget.value as RedirectRule['kind'] })
-                      }
-                    >
-                      <option value="url">Exact URL</option>
-                      <option value="urlFilter">URL pattern</option>
-                      <option value="regex">Regex (Pro)</option>
-                    </select>
-                  </Cell>
-                  <Cell>
-                    <PatternInput
-                      label="Redirect from"
-                      value={r.from}
-                      regex={r.kind === 'regex'}
-                      onInput={(from) => setRedirect(r.id, { from })}
-                      onKeyDown={onEnter(() => addRedirect(i))}
-                    />
-                  </Cell>
-                  <Cell class="rtable__cell--arrow">
-                    <ArrowRight class="icon" size={16} aria-hidden="true" />
-                  </Cell>
-                  <Cell>
-                    <input
-                      class="input input--dense mono"
-                      aria-label="Redirect to"
-                      spellcheck={false}
-                      autocomplete="off"
-                      value={r.to}
-                      onInput={(e) => setRedirect(r.id, { to: e.currentTarget.value })}
-                      onKeyDown={onEnter(() => addRedirect(i))}
-                    />
-                  </Cell>
-                  <Cell>
-                    <input
-                      class="input input--dense"
-                      aria-label="Comment"
-                      value={r.comment}
-                      onInput={(e) => setRedirect(r.id, { comment: e.currentTarget.value })}
-                    />
-                  </Cell>
-                  <Cell>
-                    <IconButton
-                      icon={Trash2}
-                      small
-                      label={`Delete redirect ${r.from}`}
-                      onClick={() =>
-                        onChange({ redirects: redirects.filter((x) => x.id !== r.id) })
-                      }
-                    />
-                  </Cell>
-                </RuleRow>
+                  rule={r}
+                  index={i}
+                  issues={issues.get(r.id)}
+                  setRow={setRedirect}
+                  addAfter={addRedirect}
+                  remove={removeRedirect}
+                />
               ))}
             </RuleTable>
             <div class="panel__actions">
@@ -236,59 +345,15 @@ export function RedirectsTab({ profile, issues, pro, onChange, onGetPro }: Props
               columns={['On', 'Match', 'Pattern', 'Comment', '']}
             >
               {blocks.map((b, i) => (
-                <RuleRow
+                <BlockRow
                   key={b.id}
-                  id={b.id}
-                  enabled={b.enabled}
-                  issues={shown(issues.get(b.id), b.pattern === '')}
-                >
-                  <Cell>
-                    <Switch
-                      small
-                      checked={b.enabled}
-                      label={`${b.enabled ? 'Turn off' : 'Turn on'} block ${b.pattern}`}
-                      onChange={(enabled) => setBlock(b.id, { enabled })}
-                    />
-                  </Cell>
-                  <Cell>
-                    <select
-                      class="select select--dense"
-                      aria-label="Match type"
-                      value={b.kind}
-                      onChange={(e) =>
-                        setBlock(b.id, { kind: e.currentTarget.value as BlockRule['kind'] })
-                      }
-                    >
-                      <option value="urlFilter">URL pattern</option>
-                      <option value="regex">Regex</option>
-                    </select>
-                  </Cell>
-                  <Cell>
-                    <PatternInput
-                      label="Block pattern"
-                      value={b.pattern}
-                      regex={b.kind === 'regex'}
-                      onInput={(pattern) => setBlock(b.id, { pattern })}
-                      onKeyDown={onEnter(() => addBlock(i))}
-                    />
-                  </Cell>
-                  <Cell>
-                    <input
-                      class="input input--dense"
-                      aria-label="Comment"
-                      value={b.comment}
-                      onInput={(e) => setBlock(b.id, { comment: e.currentTarget.value })}
-                    />
-                  </Cell>
-                  <Cell>
-                    <IconButton
-                      icon={Trash2}
-                      small
-                      label={`Delete block ${b.pattern}`}
-                      onClick={() => onChange({ blocks: blocks.filter((x) => x.id !== b.id) })}
-                    />
-                  </Cell>
-                </RuleRow>
+                  rule={b}
+                  index={i}
+                  issues={issues.get(b.id)}
+                  setRow={setBlock}
+                  addAfter={addBlock}
+                  remove={removeBlock}
+                />
               ))}
             </RuleTable>
             <div class="panel__actions">

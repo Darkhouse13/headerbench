@@ -6,6 +6,15 @@ export * from './model.js';
 export * from './dnr.js';
 export * from './encoding.js';
 export * from './validate.js';
+export {
+  NON_ASCII_REGEX_MESSAGE,
+  checkRegex,
+  checkRegexSubstitution,
+  re2Compatible,
+  re2Incompatibility,
+  toJsRegExp,
+  toRegexSubstitution,
+} from './re2.js';
 export * from './variables.js';
 export * from './items.js';
 export * from './migrate.js';
@@ -18,7 +27,8 @@ export * from './presets.js';
 export * from './export.js';
 export { importAny, IMPORT_MAX_BYTES } from './import/index.js';
 export { EXPORT_FORMAT_VERSION } from './import/headerbench.js';
-export { regexToDomain } from './import/shared.js';
+export { regexToFilter } from './import/shared.js';
+export type { SimpleFilter } from './import/shared.js';
 export { summarizeImport } from './import/report.js';
 export type {
   ImportCounts,

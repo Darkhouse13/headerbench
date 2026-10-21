@@ -21,24 +21,36 @@ export function SettingsPage() {
   const setSettings = (patch: Partial<typeof settings>): void =>
     store.update((s) => ({ ...s, settings: { ...s.settings, ...patch } }));
 
+  /** Runs a support action; a failure becomes an error toast that starts with `failed`. */
+  const attempt = async (failed: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (error) {
+      store.notify(`${failed} ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
+  };
+
   const diagnostics = async (): Promise<string> =>
     (await store.call({ type: 'getDiagnostics' })).text;
 
-  const copyDiagnostics = async (): Promise<void> => {
-    await platform.copyText(await diagnostics());
-    store.notify('Diagnostics copied. They contain no header values, variables or licence key.');
-  };
+  const copyDiagnostics = (): Promise<void> =>
+    attempt('Could not copy the diagnostics.', async () => {
+      await platform.copyText(await diagnostics());
+      store.notify('Diagnostics copied. They contain no header values, variables or licence key.');
+    });
 
-  const reportProblem = async (): Promise<void> => {
-    const body = `What happened, and what did you expect?\n\n\n---\n${await diagnostics()}`;
-    const href = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Headerbench problem')}&body=${encodeURIComponent(body)}`;
-    window.location.href = href;
-  };
+  const reportProblem = (): Promise<void> =>
+    attempt('Could not prepare the email.', async () => {
+      const body = `What happened, and what did you expect?\n\n\n---\n${await diagnostics()}`;
+      const href = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Headerbench problem')}&body=${encodeURIComponent(body)}`;
+      window.location.href = href;
+    });
 
-  const downloadCorrupt = async (): Promise<void> => {
-    const { json } = await store.call({ type: 'getCorruptData' });
-    if (json) platform.download('headerbench-unreadable-data.json', json);
-  };
+  const downloadCorrupt = (): Promise<void> =>
+    attempt('Could not download the data.', async () => {
+      const { json } = await store.call({ type: 'getCorruptData' });
+      if (json) platform.download('headerbench-unreadable-data.json', json);
+    });
 
   return (
     <div class="page">
@@ -59,7 +71,7 @@ export function SettingsPage() {
                 small
                 variant="text"
                 icon={Trash2}
-                onClick={() => void store.call({ type: 'discardCorruptData' })}
+                onClick={() => void store.run({ type: 'discardCorruptData' })}
               >
                 Discard
               </Button>
@@ -103,7 +115,7 @@ export function SettingsPage() {
           {snapshot.pro.pro || settings.sync ? (
             <Switch
               checked={settings.sync}
-              label={settings.sync ? 'Turn off sync' : 'Turn on sync'}
+              label="Sync across devices"
               onChange={(sync) => setSettings({ sync })}
             />
           ) : (

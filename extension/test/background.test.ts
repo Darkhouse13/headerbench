@@ -1,9 +1,12 @@
+import type { Profile, Variable } from '@headerbench/core';
 import { compile, proStatus, DEV_LICENSE_PUBLIC_KEY } from '@headerbench/core';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { WAKE_ALARM } from '../src/sw/background';
+import { LICENSE_ALARM, WAKE_ALARM } from '../src/sw/background';
 import { localDay } from '../src/review';
+import { decodePayload } from '../src/sw/sync';
+import type { Setup } from './helpers';
 import { DAY, HOUR, NOW, domain, header, licenseKey, profile, setup, stateWith } from './helpers';
 
 const fixture = (name: string): string =>
@@ -74,7 +77,11 @@ describe('resync', () => {
       stateWith([small], { activations: [{ profileId: small.id, tabId: null, pauseAt: null }] }),
     );
     const before = [...t.fake.dynamicRules];
-    const filters = Array.from({ length: 4600 }, (_, i) => domain(`h${i}.example.com`));
+    // Domain includes share one rule, so URL filters are what multiplies rules.
+    const filters = Array.from({ length: 4600 }, (_, i) => ({
+      ...domain(`||h${i}.example.com^`),
+      kind: 'urlFilter' as const,
+    }));
     const huge = { ...small, filters };
     const snap = await t.save(
       stateWith([huge], { activations: [{ profileId: small.id, tabId: null, pauseAt: null }] }),
@@ -351,6 +358,14 @@ describe('messages', () => {
     expect(result.matches[0]).toMatchObject({ applied: true });
     expect((await t.call({ ...req, url: 'ftp://x' })).origin).toBeNull();
 
+    // Page loads need no access to the page that starts them.
+    result = await t.call({
+      ...req,
+      resourceType: 'main_frame',
+      initiator: 'http://localhost:5173/app',
+    });
+    expect(result).toMatchObject({ pageOrigin: 'http://localhost/*', hasPageAccess: true });
+
     // Chrome also needs access to the page that sends the request.
     result = await t.call({ ...req, initiator: 'http://localhost:5173/app' });
     expect(result).toMatchObject({
@@ -617,7 +632,12 @@ describe('licences', () => {
     await t.call({ type: 'applyLicense', key: yearly });
 
     const expired = licenseKey({ exp: Math.floor((NOW - DAY) / 1000) });
-    const earlier = licenseKey({ exp: Math.floor((NOW + 30 * DAY) / 1000) });
+    // A different licence (another subscription) that ends sooner never replaces this one.
+    const earlier = licenseKey({
+      lid: 'sub_02',
+      sub: 'sub_02',
+      exp: Math.floor((NOW + 30 * DAY) / 1000),
+    });
     const later = licenseKey({ exp: Math.floor((NOW + 400 * DAY) / 1000) });
     const lifetime = licenseKey({ plan: 'pro_lifetime', exp: null, sub: null, lid: 'txn_09' });
     const stored = async () => (await t.call({ type: 'getState' })).state.settings.licenseKey;
@@ -748,18 +768,736 @@ describe('sync', () => {
     await t.save({ ...base, settings: { ...base.settings, sync: true } });
     await t.bg.idle();
     const remote = profile('From laptop', { requestHeaders: [header('X-R', '1')] });
-    const text = JSON.stringify({ profiles: [remote], variables: [] });
-    const meta = {
-      v: 1,
-      device: 'other-device',
-      writtenAt: NOW + 1,
-      chunks: 1,
-      bytes: text.length,
+    await t.bg.onSyncChanged(writeMirror(t, 'other-device', { profiles: [remote], variables: [] }));
+    expect(await names(t)).toEqual(['From laptop']);
+  });
+
+  // Regression: device B had settings.sync on before it had Pro. Applying a licence pushed B's
+  // profiles over the mirror and dropped device A's.
+  it('keeps profiles other devices mirrored when sync turns on through a licence', async () => {
+    const a = setup();
+    await a.call({ type: 'applyLicense', key: licenseKey() });
+    const aBase = (await a.call({ type: 'getState' })).state;
+    await a.save({
+      ...aBase,
+      profiles: [profile('FromDeviceA')],
+      settings: { ...aBase.settings, sync: true },
+    });
+    await a.bg.idle();
+
+    const b = setup({ sync: a.api.storage.sync });
+    const bBase = (await b.call({ type: 'getState' })).state;
+    await b.save({
+      ...bBase,
+      profiles: [profile('OnB')],
+      settings: { ...bBase.settings, sync: true },
+    });
+    await b.bg.idle();
+    await b.call({ type: 'applyLicense', key: licenseKey() });
+    await b.bg.idle();
+
+    expect((await names(b)).sort()).toEqual(['FromDeviceA', 'OnB']);
+    expect(mirrorNames(a).sort()).toEqual(['FromDeviceA', 'OnB']);
+  });
+
+  // Regression: an older payload from another device (here a 1.0.2-style write that lacks a
+  // profile this device just created) replaced local state and deleted the new profile.
+  it('never deletes a local profile because another device’s payload lacks it', async () => {
+    const a = setup();
+    await a.call({ type: 'applyLicense', key: licenseKey() });
+    const shared = profile('Shared', { updatedAt: NOW });
+    const base = (await a.call({ type: 'getState' })).state;
+    await a.save({ ...base, profiles: [shared], settings: { ...base.settings, sync: true } });
+    await a.bg.idle();
+    const withNew = (await a.call({ type: 'getState' })).state;
+    await a.save({ ...withNew, profiles: [...withNew.profiles, profile('NewOnA')] });
+    await a.bg.idle();
+
+    const editedOnB = { ...shared, name: 'Shared (edited on B)', updatedAt: NOW + 5 };
+    await a.bg.onSyncChanged(writeMirror(a, 'device-b', { profiles: [editedOnB], variables: [] }));
+    await a.bg.idle();
+
+    expect(await names(a)).toEqual(['Shared (edited on B)', 'NewOnA']);
+    // A pushes back what B's write lacked.
+    expect(mirrorNames(a)).toEqual(['Shared (edited on B)', 'NewOnA']);
+  });
+
+  it('keeps concurrent edits to different profiles from two devices', async () => {
+    const { a, b, one, two } = await twoDevices();
+    const aState = (await a.call({ type: 'getState' })).state;
+    const bState = (await b.call({ type: 'getState' })).state;
+    // Both edit from the same starting point before seeing each other's change.
+    a.clock.now = NOW + 10;
+    await a.save({
+      ...aState,
+      profiles: aState.profiles.map((p) =>
+        p.id === one.id ? { ...p, name: 'One (A)', updatedAt: NOW + 10 } : p,
+      ),
+    });
+    b.clock.now = NOW + 20;
+    await b.save({
+      ...bState,
+      profiles: bState.profiles.map((p) =>
+        p.id === two.id ? { ...p, name: 'Two (B)', updatedAt: NOW + 20 } : p,
+      ),
+    });
+    await a.bg.idle();
+    await b.bg.idle();
+    await deliver(a, b);
+    expect((await names(a)).sort()).toEqual(['One (A)', 'Two (B)']);
+    expect((await names(b)).sort()).toEqual(['One (A)', 'Two (B)']);
+  });
+
+  it('propagates a deletion, and a stale copy from another device does not bring it back', async () => {
+    const { a, b, one } = await twoDevices();
+    a.clock.now = NOW + DAY;
+    const aState = (await a.call({ type: 'getState' })).state;
+    await a.save({ ...aState, profiles: aState.profiles.filter((p) => p.id !== one.id) });
+    await a.bg.idle();
+    await deliver(a, b);
+    expect(await names(b)).toEqual(['Two']);
+
+    // A 1.0.2 device still has the old copy and writes it back.
+    await a.bg.onSyncChanged(writeMirror(a, 'old-device', { profiles: [one], variables: [] }));
+    await a.bg.idle();
+    expect(await names(a)).toEqual(['Two']);
+    expect(mirrorNames(a)).toEqual(['Two']);
+  });
+
+  it('keeps a profile restored after a delete (undo), on every device', async () => {
+    const { a, b, one } = await twoDevices();
+    a.clock.now = NOW + DAY;
+    const before = (await a.call({ type: 'getState' })).state;
+    await a.save({ ...before, profiles: before.profiles.filter((p) => p.id !== one.id) });
+    await a.bg.idle();
+    a.clock.now = NOW + DAY + 1000;
+    const after = (await a.call({ type: 'getState' })).state;
+    const restored = await a.save({ ...after, profiles: before.profiles });
+    expect(restored.state.profiles.find((p) => p.id === one.id)?.updatedAt).toBeGreaterThan(
+      NOW + DAY,
+    );
+    await a.bg.idle();
+    await deliver(a, b);
+    expect((await names(a)).sort()).toEqual(['One', 'Two']);
+    expect((await names(b)).sort()).toEqual(['One', 'Two']);
+  });
+
+  // Regression: the mirror fingerprint ignored order, so a reorder on A was never pushed.
+  it('mirrors a reorder (rule priority) to the other device', async () => {
+    const { a, b } = await twoDevices();
+    await reorder(a, NOW + HOUR, ['Two', 'One']);
+    expect(mirrorNames(a)).toEqual(['Two', 'One']);
+    await deliver(a, b);
+    expect(await names(b)).toEqual(['Two', 'One']);
+    expect(await names(a)).toEqual(['Two', 'One']);
+  });
+
+  // Regression: an unrelated edit on B, pushed with B's old order, undid A's reorder.
+  it('keeps a reorder when another device then edits something else', async () => {
+    const { a, b, one } = await twoDevices();
+    await reorder(a, NOW + HOUR, ['Two', 'One']);
+    // B has not seen A's change yet and renames One.
+    b.clock.now = NOW + 2 * HOUR;
+    const bState = (await b.call({ type: 'getState' })).state;
+    expect(bState.profiles.map((p) => p.name)).toEqual(['One', 'Two']);
+    await b.save({
+      ...bState,
+      profiles: bState.profiles.map((p) =>
+        p.id === one.id ? { ...p, name: 'One (B)', updatedAt: NOW + 2 * HOUR } : p,
+      ),
+    });
+    await b.bg.idle();
+    await deliver(b, a);
+    expect(await names(a)).toEqual(['Two', 'One (B)']);
+    expect(await names(b)).toEqual(['Two', 'One (B)']);
+    // A reorder on B later still wins over A's older one.
+    await reorder(b, NOW + 3 * HOUR, ['One (B)', 'Two']);
+    await deliver(b, a);
+    expect(await names(a)).toEqual(['One (B)', 'Two']);
+  });
+
+  it('settles after a reorder: no ping-pong of mirror writes between two devices', async () => {
+    const { a, b } = await twoDevices();
+    const area = a.api.storage.sync;
+    const set = area.set.bind(area);
+    let writes = 0;
+    area.set = async (items) => {
+      writes++;
+      return set(items);
     };
-    t.api.storage.sync.data = { 'hb.0': text, 'hb.meta': meta };
-    await t.bg.onSyncChanged({ 'hb.meta': { newValue: meta } });
-    expect((await t.call({ type: 'getState' })).state.profiles.map((p) => p.name)).toEqual([
-      'From laptop',
+    await reorder(a, NOW + HOUR, ['Two', 'One']);
+    await deliver(a, b);
+    const settled = writes;
+    expect(settled).toBe(1);
+    for (let i = 0; i < 3; i++) {
+      await deliver(a, b);
+      await deliver(b, a);
+    }
+    expect(writes).toBe(settled);
+    expect(await names(a)).toEqual(['Two', 'One']);
+    expect(await names(b)).toEqual(['Two', 'One']);
+  });
+
+  it('takes the variable list from the device that changed it last', async () => {
+    const { a, b } = await twoDevices();
+    a.clock.now = NOW + HOUR;
+    const aState = (await a.call({ type: 'getState' })).state;
+    await a.save({
+      ...aState,
+      settings: { ...aState.settings, variables: [{ id: 'v1', name: 'token', value: 'abc' }] },
+    });
+    await a.bg.idle();
+    await deliver(a, b);
+    expect((await b.call({ type: 'getState' })).state.settings.variables).toEqual([
+      { id: 'v1', name: 'token', value: 'abc' },
+    ]);
+    // Deleting all variables on B propagates too (B's list is newer).
+    b.clock.now = NOW + 2 * HOUR;
+    const bState = (await b.call({ type: 'getState' })).state;
+    await b.save({ ...bState, settings: { ...bState.settings, variables: [] } });
+    await b.bg.idle();
+    await deliver(b, a);
+    expect((await a.call({ type: 'getState' })).state.settings.variables).toEqual([]);
+  });
+
+  it('drops the activation of a profile another device deleted', async () => {
+    const { a, b, one } = await twoDevices();
+    await b.call({ type: 'activate', profileId: one.id, tabId: null, pauseAt: null });
+    a.clock.now = NOW + DAY;
+    const aState = (await a.call({ type: 'getState' })).state;
+    await a.save({ ...aState, profiles: aState.profiles.filter((p) => p.id !== one.id) });
+    await a.bg.idle();
+    await deliver(a, b);
+    expect((await b.call({ type: 'getState' })).state.settings.activations).toEqual([]);
+  });
+
+  it('ignores a half-arrived mirror write', async () => {
+    const t = setup();
+    await t.call({ type: 'applyLicense', key: licenseKey() });
+    const base = (await t.call({ type: 'getState' })).state;
+    await t.save({
+      ...base,
+      profiles: [profile('Mine')],
+      settings: { ...base.settings, sync: true },
+    });
+    await t.bg.idle();
+    const changes = writeMirror(t, 'other', { profiles: [profile('Theirs')], variables: [] });
+    t.api.storage.sync.data['hb.0'] = '{"profiles":[';
+    await t.bg.onSyncChanged(changes);
+    expect(await names(t)).toEqual(['Mine']);
+  });
+
+  it('catches up with the mirror on browser start', async () => {
+    const t = setup();
+    await t.call({ type: 'applyLicense', key: licenseKey() });
+    const base = (await t.call({ type: 'getState' })).state;
+    await t.save({ ...base, settings: { ...base.settings, sync: true } });
+    await t.bg.idle();
+    writeMirror(t, 'other', { profiles: [profile('While closed')], variables: [] });
+    await t.bg.onStartup();
+    await t.bg.idle();
+    expect(await names(t)).toEqual(['While closed']);
+  });
+});
+
+async function names(t: Setup): Promise<string[]> {
+  return (await t.call({ type: 'getState' })).state.profiles.map((p) => p.name);
+}
+
+function mirrorNames(t: Setup): string[] {
+  return decodePayload(t.api.storage.sync.data, NOW)?.payload.profiles.map((p) => p.name) ?? [];
+}
+
+/**
+ * Writes a mirror the way Headerbench 1.0.2 does (v1 payload, no tombstones) as `device`, and
+ * returns the change event Chrome would deliver.
+ */
+function writeMirror(
+  t: Setup,
+  device: string,
+  payload: { profiles: Profile[]; variables: Variable[] },
+): Record<string, chrome.storage.StorageChange> {
+  const text = JSON.stringify(payload);
+  const bytes = 'hb.0'.length + new TextEncoder().encode(JSON.stringify(text)).length;
+  const meta = { v: 1, device, writtenAt: t.clock.now, chunks: 1, bytes };
+  t.api.storage.sync.data = { 'hb.0': text, 'hb.meta': meta };
+  return { 'hb.0': { newValue: text }, 'hb.meta': { newValue: meta } };
+}
+
+/** Delivers `from`'s last mirror write to `to`, as Chrome sync would, and lets `to` settle. */
+async function deliver(from: Setup, to: Setup): Promise<void> {
+  const data = from.api.storage.sync.data;
+  await to.bg.onSyncChanged({ 'hb.meta': { newValue: data['hb.meta'] } });
+  await to.bg.idle();
+  await from.bg.onSyncChanged({ 'hb.meta': { newValue: to.api.storage.sync.data['hb.meta'] } });
+  await from.bg.idle();
+}
+
+/** Reorders `t`'s profiles by name at `at`, the way dragging in the editor does, and syncs. */
+async function reorder(t: Setup, at: number, order: string[]): Promise<void> {
+  t.clock.now = at;
+  const state = (await t.call({ type: 'getState' })).state;
+  const byName = new Map(state.profiles.map((p) => [p.name, p]));
+  await t.save({ ...state, profiles: order.map((name) => byName.get(name) as Profile) });
+  await t.bg.idle();
+}
+
+/** Two Pro devices with sync on that share profiles One and Two. */
+async function twoDevices() {
+  const a = setup();
+  await a.call({ type: 'applyLicense', key: licenseKey() });
+  const one = profile('One', { updatedAt: NOW });
+  const two = profile('Two', { updatedAt: NOW });
+  const base = (await a.call({ type: 'getState' })).state;
+  await a.save({ ...base, profiles: [one, two], settings: { ...base.settings, sync: true } });
+  await a.bg.idle();
+  const b = setup({ sync: a.api.storage.sync });
+  await b.call({ type: 'applyLicense', key: licenseKey() });
+  const bBase = (await b.call({ type: 'getState' })).state;
+  await b.save({ ...bBase, settings: { ...bBase.settings, sync: true } });
+  await b.bg.idle();
+  expect(await names(b)).toEqual(['One', 'Two']);
+  return { a, b, one, two };
+}
+
+describe('background licence refresh', () => {
+  /** A setup whose fetch is counted and answers with `respond()`. */
+  function counted(respond: () => Response) {
+    const calls: { url: string; body: string }[] = [];
+    const t = setup({
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), body: String(init?.body) });
+        return respond();
+      },
+    });
+    return { t, calls };
+  }
+  const expiringIn = (ms: number) => licenseKey({ exp: Math.floor((NOW + ms) / 1000) });
+
+  it('arms a 6-hourly alarm on install, update and browser start', async () => {
+    const { t } = counted(() => new Response('{}'));
+    await t.bg.onInstalled({ reason: 'update' });
+    expect(t.fake.alarms.get(LICENSE_ALARM)).toEqual({ delayInMinutes: 360, periodInMinutes: 360 });
+    t.fake.alarms.clear();
+    await t.bg.onStartup();
+    expect(t.fake.alarms.get(LICENSE_ALARM)?.periodInMinutes).toBe(360);
+  });
+
+  it('arms the alarm when the service worker starts, e.g. after disable and enable', async () => {
+    const { t } = counted(() => new Response('{}'));
+    t.bg.register();
+    await t.bg.idle();
+    await Promise.resolve();
+    expect(t.fake.alarms.get(LICENSE_ALARM)).toEqual({ delayInMinutes: 360, periodInMinutes: 360 });
+  });
+
+  it('keeps a running licence alarm and replaces one with a different period', async () => {
+    const { t } = counted(() => new Response('{}'));
+    const running = { when: NOW + 2 * HOUR, periodInMinutes: 360 };
+    t.fake.alarms.set(LICENSE_ALARM, running);
+    await t.bg.onStartup();
+    t.bg.register();
+    await t.bg.idle();
+    expect(t.fake.alarms.get(LICENSE_ALARM)).toBe(running);
+    t.fake.alarms.set(LICENSE_ALARM, { when: NOW, periodInMinutes: 60 });
+    await t.bg.onInstalled({ reason: 'update' });
+    expect(t.fake.alarms.get(LICENSE_ALARM)).toEqual({ delayInMinutes: 360, periodInMinutes: 360 });
+  });
+
+  // Regression: near the period end the server re-signs the same exp with a new iat every 6 h;
+  // each save bumped rev, so an open editor hit "changed in another window".
+  it('does not store a refreshed key that only differs by when it was signed', async () => {
+    const exp = Math.floor((NOW + 5 * DAY) / 1000);
+    const stored = licenseKey({ exp, iat: Math.floor(NOW / 1000) - DAY / 1000 });
+    const resigned = licenseKey({ exp, iat: Math.floor(NOW / 1000) });
+    expect(resigned).not.toBe(stored);
+    const { t, calls } = counted(() => Response.json({ key: resigned }));
+    await t.call({ type: 'applyLicense', key: stored });
+    const before = await t.call({ type: 'getState' });
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    const manual = await t.call({ type: 'refreshLicense', auto: false });
+    expect(calls).toHaveLength(2);
+    const after = await t.call({ type: 'getState' });
+    expect(after.rev).toBe(before.rev);
+    expect(after.state.settings.licenseKey).toBe(stored);
+    expect(manual.snapshot.rev).toBe(before.rev);
+    expect(after.licenseRefreshError).toBeNull();
+  });
+
+  it('stores a renewed key from a background refresh without bumping rev', async () => {
+    const fresh = expiringIn(60 * DAY);
+    const { t } = counted(() => Response.json({ key: fresh }));
+    await t.call({ type: 'applyLicense', key: expiringIn(10 * DAY) });
+    const before = await t.call({ type: 'getState' });
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    const after = await t.call({ type: 'getState' });
+    expect(after.state.settings.licenseKey).toBe(fresh);
+    expect(after.rev).toBe(before.rev);
+    // The editor, opened before the refresh, can still save.
+    const saved = await t.call({ type: 'saveState', state: before.state, rev: before.rev });
+    expect(saved.state.settings.licenseKey).toBe(fresh);
+  });
+
+  it('refreshes a yearly licence in its last 14 days: one request per 6 hours', async () => {
+    const fresh = expiringIn(60 * DAY);
+    const { t, calls } = counted(() => Response.json({ key: fresh }));
+    const old = expiringIn(10 * DAY);
+    await t.call({ type: 'applyLicense', key: old });
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    await t.call({ type: 'refreshLicense', auto: true });
+    expect(calls).toEqual([
+      { url: 'https://headerbench.com/api/license/refresh', body: JSON.stringify({ key: old }) },
+    ]);
+    const snap = await t.call({ type: 'getState' });
+    expect(snap.state.settings.licenseKey).toBe(fresh);
+    expect(snap.licenseRefreshError).toBeNull();
+  });
+
+  it('makes no request when nothing is due: far from expiry, lifetime, expired or no key', async () => {
+    const { t, calls } = counted(() => new Response('{}', { status: 500 }));
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    await t.call({ type: 'applyLicense', key: expiringIn(20 * DAY) });
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    await t.bg.onStartup();
+    t.clock.now = NOW + 21 * DAY;
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    expect(calls).toHaveLength(0);
+
+    const life = counted(() => new Response('{}'));
+    await life.t.call({
+      type: 'applyLicense',
+      key: licenseKey({ plan: 'pro_lifetime', exp: null, sub: null }),
+    });
+    await life.t.bg.onAlarm({ name: LICENSE_ALARM });
+    expect(life.calls).toHaveLength(0);
+  });
+
+  it('records a network failure for Settings and changes nothing else', async () => {
+    const t = setup({
+      fetch: async () => {
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    const old = expiringIn(5 * DAY);
+    await t.call({ type: 'applyLicense', key: old });
+    const before = await t.call({ type: 'getState' });
+    t.clock.now = NOW + HOUR;
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    const after = await t.call({ type: 'getState' });
+    expect(after.rev).toBe(before.rev);
+    expect(after.state).toEqual(before.state);
+    expect(after.pro).toMatchObject({ pro: true, source: 'license' });
+    expect(after.licenseRefreshError).toEqual({
+      at: NOW + HOUR,
+      code: 'network',
+      message: expect.stringMatching(/Could not reach headerbench\.com/),
+    });
+  });
+
+  it('records a 410 from the server, then clears it once a refresh succeeds', async () => {
+    let respond = () =>
+      Response.json(
+        { reason: 'subscription_inactive', message: 'Your subscription was cancelled on Oct 1.' },
+        { status: 410 },
+      );
+    const fresh = expiringIn(60 * DAY);
+    const t = setup({ fetch: async () => respond() });
+    await t.call({ type: 'applyLicense', key: expiringIn(5 * DAY) });
+    await t.bg.onStartup();
+    expect((await t.call({ type: 'getState' })).licenseRefreshError).toMatchObject({
+      code: 'subscription_inactive',
+      message: 'Your subscription was cancelled on Oct 1.',
+    });
+    respond = () => Response.json({ key: fresh });
+    t.clock.now = NOW + 7 * HOUR;
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    const snap = await t.call({ type: 'getState' });
+    expect(snap.licenseRefreshError).toBeNull();
+    expect(snap.state.settings.licenseKey).toBe(fresh);
+  });
+
+  it('makes one request when several triggers fire at once', async () => {
+    let count = 0;
+    const t = setup({ fetch: async () => (count++, new Response('{}', { status: 503 })) });
+    await t.call({ type: 'applyLicense', key: expiringIn(5 * DAY) });
+    await Promise.all([
+      t.bg.onAlarm({ name: LICENSE_ALARM }),
+      t.bg.dispatch({ type: 'refreshLicense', auto: true }),
+      t.bg.onInstalled({ reason: 'update' }),
+    ]);
+    expect(count).toBe(1);
+  });
+
+  it('accepts a shorter key for the same licence from the server (60-day keys)', async () => {
+    const shorter = expiringIn(60 * DAY);
+    const t = setup({ fetch: async () => Response.json({ key: shorter }) });
+    await t.call({ type: 'applyLicense', key: licenseKey() });
+    const outcome = await t.call({ type: 'refreshLicense', auto: false });
+    expect(outcome.snapshot.state.settings.licenseKey).toBe(shorter);
+    expect(outcome.expiresAt).toBe(NOW + 60 * DAY);
+  });
+
+  it('lands a shorter same-licence key in the background without looping', async () => {
+    let count = 0;
+    const t = setup({
+      fetch: async () => (count++, Response.json({ key: expiringIn(12 * DAY) })),
+    });
+    await t.call({ type: 'applyLicense', key: expiringIn(13 * DAY) });
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    expect((await t.call({ type: 'getState' })).pro.licenseExpiresAt).toBe(NOW + 12 * DAY);
+    // Still inside the 14-day window, but the 6-hour throttle holds.
+    t.clock.now = NOW + 5 * HOUR;
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    expect(count).toBe(1);
+    t.clock.now = NOW + 7 * HOUR;
+    await t.bg.onAlarm({ name: LICENSE_ALARM });
+    expect(count).toBe(2);
+  });
+
+  it('keeps the stored key when the server sends a different licence that ends sooner', async () => {
+    const other = licenseKey({
+      lid: 'sub_02',
+      sub: 'sub_02',
+      exp: Math.floor((NOW + 60 * DAY) / 1000),
+    });
+    const t = setup({ fetch: async () => Response.json({ key: other }) });
+    const current = licenseKey();
+    await t.call({ type: 'applyLicense', key: current });
+    const outcome = await t.call({ type: 'refreshLicense', auto: false });
+    expect(outcome.snapshot.state.settings.licenseKey).toBe(current);
+    expect(outcome.expiresAt).toBe(NOW + 300 * DAY);
+  });
+
+  it('never replaces a lifetime licence with a yearly key of any lid', async () => {
+    const t = setup();
+    const lifetime = licenseKey({ plan: 'pro_lifetime', exp: null, sub: null, lid: 'sub_01' });
+    await t.call({ type: 'applyLicense', key: lifetime });
+    expect(await t.bg.dispatch({ type: 'applyLicense', key: licenseKey() })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/lifetime licence is already active/),
+    });
+    expect((await t.call({ type: 'getState' })).state.settings.licenseKey).toBe(lifetime);
+  });
+});
+
+describe('trial', () => {
+  const proProfile = () =>
+    profile('Pro', {
+      mocks: [
+        {
+          id: 'm',
+          enabled: true,
+          kind: 'urlFilter',
+          pattern: '/api',
+          contentType: 'application/json',
+          body: '{}',
+          comment: '',
+        },
+      ],
+    });
+
+  it('does not start for someone whose licence has expired', async () => {
+    const t = setup();
+    await t.call({
+      type: 'applyLicense',
+      key: licenseKey({ exp: Math.floor((NOW + DAY) / 1000) }),
+    });
+    t.clock.now = NOW + 2 * DAY;
+    let snap = await t.save({
+      ...(await t.call({ type: 'getState' })).state,
+      profiles: [proProfile()],
+    });
+    expect(snap.state.settings.trialStartedAt).toBeNull();
+    expect(snap.pro).toMatchObject({ pro: false, plan: 'pro_yearly' });
+    snap = await t.call({ type: 'startTrial' });
+    expect(snap.state.settings.trialStartedAt).toBeNull();
+  });
+
+  it('starts on request for someone who never had a licence', async () => {
+    const t = setup();
+    const snap = await t.call({ type: 'startTrial' });
+    expect(snap.state.settings.trialStartedAt).toBe(NOW);
+  });
+});
+
+describe('tab-scoped activations', () => {
+  it('keeps one profile on in several tabs and turns it off per tab', async () => {
+    const t = setup();
+    const p = profile('Tabs', { requestHeaders: [header('X-Tab', '1')] });
+    await t.save(stateWith([p]));
+    await t.call({ type: 'activate', profileId: p.id, tabId: 1, pauseAt: null });
+    let snap = await t.call({ type: 'activate', profileId: p.id, tabId: 2, pauseAt: null });
+    expect(snap.state.settings.activations).toEqual([
+      { profileId: p.id, tabId: 1, pauseAt: null },
+      { profileId: p.id, tabId: 2, pauseAt: null },
+    ]);
+    expect(t.fake.sessionRules.map((r) => r.condition.tabIds)).toEqual([[1], [2]]);
+
+    snap = await t.call({ type: 'deactivate', profileId: p.id, tabId: 1 });
+    expect(snap.state.settings.activations).toEqual([{ profileId: p.id, tabId: 2, pauseAt: null }]);
+    await t.bg.onTabRemoved(2);
+    expect((await t.call({ type: 'getState' })).state.settings.activations).toEqual([]);
+    expect(t.fake.sessionRules).toEqual([]);
+  });
+
+  it('turning on everywhere replaces the tabs; deactivate without a tab turns all off', async () => {
+    const t = setup();
+    const p = profile('Tabs', { requestHeaders: [header('X-Tab', '1')] });
+    await t.save(stateWith([p]));
+    await t.call({ type: 'activate', profileId: p.id, tabId: 1, pauseAt: null });
+    await t.call({ type: 'activate', profileId: p.id, tabId: 2, pauseAt: null });
+    let snap = await t.call({ type: 'activate', profileId: p.id, tabId: null, pauseAt: null });
+    expect(snap.state.settings.activations).toEqual([
+      { profileId: p.id, tabId: null, pauseAt: null },
+    ]);
+    snap = await t.call({ type: 'activate', profileId: p.id, tabId: 3, pauseAt: null });
+    expect(snap.state.settings.activations).toEqual([{ profileId: p.id, tabId: 3, pauseAt: null }]);
+    await t.call({ type: 'activate', profileId: p.id, tabId: 4, pauseAt: null });
+    snap = await t.call({ type: 'deactivate', profileId: p.id });
+    expect(snap.state.settings.activations).toEqual([]);
+  });
+});
+
+describe('rule install failures', () => {
+  it('leaves the session rules alone when the dynamic list cannot be installed', async () => {
+    const t = setup();
+    const p = profile('Tab', { requestHeaders: [header('X-A', '1')] });
+    await t.save(stateWith([p]));
+    await t.call({ type: 'activate', profileId: p.id, tabId: 5, pauseAt: null });
+    const session = [...t.fake.sessionRules];
+    const sessionUpdates = t.fake.updates.sessionRules;
+    t.fake.failList.dynamicRules = 'Internal error.';
+    const snap = await t.call({ type: 'activate', profileId: p.id, tabId: 6, pauseAt: null });
+    expect(snap.ruleError).toBe('Chrome refused the dynamic rules: Internal error.');
+    expect(t.fake.updates.sessionRules).toBe(sessionUpdates);
+    expect(t.fake.sessionRules).toEqual(session);
+  });
+
+  it('splits a rejected header rule so only the bad row is dropped and explained', async () => {
+    const t = setup();
+    const good = header('X-Good', '1');
+    const bad = header('X-Bad', '2');
+    const reply = { ...header('X-Reply', '3'), id: 'reply' };
+    const p = profile('Mixed headers', {
+      requestHeaders: [good, bad],
+      responseHeaders: [reply],
+    });
+    t.fake.rejectHeader.add('x-bad');
+    const snap = await t.save(
+      stateWith([p], { activations: [{ profileId: p.id, tabId: null, pauseAt: null }] }),
+    );
+    const installed = t.fake.dynamicRules.map((r) => [
+      ...(r.action.requestHeaders ?? []).map((h) => h.header),
+      ...(r.action.responseHeaders ?? []).map((h) => h.header),
+    ]);
+    expect(installed).toEqual([['x-good'], ['X-Reply']]);
+    expect(new Set(t.fake.dynamicRules.map((r) => r.priority)).size).toBe(1);
+    expect(t.fake.dynamicRules.every((r) => r.id > 1)).toBe(true);
+    const rejected = snap.warnings.filter((w) => w.message.startsWith('Chrome rejected'));
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ profileId: p.id, itemIds: [bad.id] });
+    expect(snap.ruleError).toBeNull();
+
+    // Matched split rules still map back to their rows.
+    t.fake.matched = t.fake.dynamicRules.map((r) => ({
+      rule: { ruleId: r.id, rulesetId: '_dynamic' },
+      tabId: 8,
+      timeStamp: NOW,
+    }));
+    const matches = await t.call({ type: 'getMatchesForTab', tabId: 8 });
+    if (matches.unavailable) throw new Error('should be available');
+    expect(matches.applied.map((e) => e.itemId).sort()).toEqual([good.id, 'reply'].sort());
+  });
+});
+
+describe('rule install: rules whose condition Chrome refuses', () => {
+  const allOn = (profiles: Profile[]) =>
+    stateWith(profiles, {
+      activations: profiles.map((p) => ({ profileId: p.id, tabId: null, pauseAt: null })),
+    });
+
+  /** A profile filtered by a regex the fake Chrome refuses, with `headers` request headers. */
+  function badProfile(t: Setup, n: number, headers: number): Profile {
+    const regex = `^https://bad${n}\\.example/.*`;
+    t.fake.rejectRegex.add(regex);
+    return profile(`Bad ${n}`, {
+      filters: [{ id: `f${n}`, enabled: true, kind: 'regex', value: regex, exclude: false }],
+      requestHeaders: Array.from({ length: headers }, (_, i) => header(`X-H${i}`, String(i))),
+    });
+  }
+
+  // Regression: each header name of a split rule cost one of 20 attempts, so a few such
+  // profiles made Chrome-facing installs give up and keep stale rules.
+  it('drops a split rule after two rejected parts and reports each row once', async () => {
+    const t = setup();
+    const bad = [1, 2, 3].map((n) => badProfile(t, n, 5));
+    const good = profile('Good', { requestHeaders: [header('X-Good', '1')] });
+    const snap = await t.save(allOn([...bad, good]));
+    expect(snap.ruleError).toBeNull();
+    expect(t.fake.dynamicRules.map((r) => r.action.requestHeaders?.[0]?.header)).toEqual([
+      'x-good',
+    ]);
+    const rejected = snap.warnings.filter((w) => w.message.startsWith('Chrome rejected'));
+    for (const p of bad) {
+      const items = rejected.filter((w) => w.profileId === p.id).flatMap((w) => w.itemIds);
+      expect(items.sort()).toEqual(p.requestHeaders.map((h) => h.id).sort());
+    }
+    // Per bad profile: the whole rule, then two parts. Plus the final successful update.
+    expect(t.fake.updates.dynamicRules).toBe(3 * 3 + 1);
+  });
+
+  it('counts rejections per compiled rule, not per split part, against the cap', async () => {
+    const t = setup();
+    // 8 profiles × 5 headers: 8 refused rules, well under the cap, though 24 updates fail.
+    const bad = Array.from({ length: 8 }, (_, i) => badProfile(t, i, 5));
+    const good = profile('Good', { requestHeaders: [header('X-Good', '1')] });
+    const snap = await t.save(allOn([...bad, good]));
+    expect(snap.ruleError).toBeNull();
+    expect(t.fake.dynamicRules).toHaveLength(1);
+
+    const many = setup();
+    const tooMany = Array.from({ length: 21 }, (_, i) => badProfile(many, i, 1));
+    const capped = await many.save(allOn(tooMany));
+    expect(capped.ruleError).toBe(
+      'Chrome rejected more than 20 dynamic rules. The previous rules stay in place.',
+    );
+  });
+});
+
+describe('storage full', () => {
+  it('refuses the save with a plain reason and keeps the stored state', async () => {
+    const t = setup();
+    const kept = await t.save(stateWith([profile('Kept')]));
+    t.api.storage.local.quotaBytes = t.api.storage.local.bytes() + 1000;
+    const big = profile('Big', {
+      mocks: [
+        {
+          id: 'm',
+          enabled: true,
+          kind: 'urlFilter',
+          pattern: '/x',
+          contentType: 'text/plain',
+          body: 'y'.repeat(50_000),
+          comment: '',
+        },
+      ],
+    });
+    const reply = await t.bg.dispatch({
+      type: 'saveState',
+      state: { ...kept.state, profiles: [...kept.state.profiles, big] },
+      rev: kept.rev,
+    });
+    expect(reply).toEqual({
+      ok: false,
+      code: 'storage_full',
+      error: "Headerbench's storage is full (Chrome allows 10 MB). Remove large mocks or profiles.",
+    });
+    t.api.storage.local.quotaBytes = null;
+    const fresh = setup();
+    fresh.api.storage.local.data = t.api.storage.local.data;
+    expect((await fresh.call({ type: 'getState' })).state.profiles.map((p) => p.name)).toEqual([
+      'Kept',
     ]);
   });
 });

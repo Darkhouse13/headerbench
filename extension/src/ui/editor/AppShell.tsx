@@ -1,5 +1,5 @@
 import type { Profile } from '@headerbench/core';
-import { exportFileName, exportJson, newProfile, originsFor } from '@headerbench/core';
+import { exportFileName, exportJson, newProfile } from '@headerbench/core';
 import {
   Braces,
   Download,
@@ -13,7 +13,7 @@ import {
 } from 'lucide-preact';
 import type { LucideIcon } from 'lucide-preact';
 import { useEffect, useState } from 'preact/hooks';
-import { useAccess } from '../access';
+import { needsPageAccess, useAccess } from '../access';
 import { useActivation } from '../activation';
 import { Banner, Button, EmptyState, Switch } from '../components/controls';
 import { Logo } from '../components/Logo';
@@ -101,8 +101,8 @@ function TopBar({ route }: { route: Route }) {
         <span class="topbar__state">{paused ? 'All paused' : 'Rules on'}</span>
         <Switch
           checked={!paused}
-          label={paused ? 'Resume all profiles' : 'Pause all profiles'}
-          onChange={(on) => void store.call({ type: 'setPaused', paused: !on })}
+          label="Rules"
+          onChange={(on) => void store.run({ type: 'setPaused', paused: !on })}
         />
       </div>
     </header>
@@ -162,7 +162,7 @@ function ProfilesView({
               enabledHere.has(selected.id) &&
               onIds.has(selected.id) &&
               !allSites &&
-              originsFor(selected).length > 0
+              needsPageAccess(selected)
             }
             controls={controls}
             onGrant={() => grant(selected)}

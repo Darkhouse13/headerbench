@@ -3,9 +3,9 @@ import type { LicenseFailure, LicensePayload, ProStatus, State } from '@headerbe
 import { usesVariables, verifyLicense } from '@headerbench/core';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** The UI asks for a refresh when a yearly licence expires within this window. */
+/** A yearly licence is refreshed automatically in the last 14 days before it expires. */
 export const REFRESH_WINDOW_MS = 14 * DAY_MS;
-/** Automatic refreshes are attempted at most this often. */
+/** Automatic refreshes are attempted at most this often; also the background alarm's period. */
 export const AUTO_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const REFRESH_TIMEOUT_MS = 10_000;
 
@@ -29,14 +29,18 @@ export interface LicenseKeys {
   revoked: readonly string[];
 }
 
-export type LicenseCheck = { ok: true; payload: LicensePayload } | { ok: false; error: string };
+export type LicenseCheck =
+  | { ok: true; payload: LicensePayload }
+  /** `shorter`: authentic and unexpired, but the current key lasts longer. */
+  | { ok: false; error: string; shorter?: true };
 
 const day = (sec: number): string => new Date(sec * 1000).toISOString().slice(0, 10);
 
 /**
  * Whether `candidate` may become the stored licence. It must be authentic and unexpired, and it
  * never replaces a valid current key that lasts longer: lifetime beats yearly, and a later
- * expiry beats an earlier one. `nowSec` is unix seconds.
+ * expiry beats an earlier one, except for a newer key of the same licence (same `lid` and plan),
+ * which always wins. `nowSec` is unix seconds.
  */
 export function checkLicenseReplacement(
   candidate: string,
@@ -62,21 +66,29 @@ export function checkLicenseReplacement(
     return {
       ok: false,
       error: 'Your lifetime licence is already active, so this key was not applied.',
+      shorter: true,
     };
   }
-  if (currentExp !== null && nextExp !== null && nextExp < currentExp) {
+  // Same subscription: the server is the authority on how long it runs (it now issues keys of at
+  // most 60 days, so a refresh can legitimately end sooner than a 1-year key from before).
+  const sameLicence =
+    next.payload.lid === now.payload.lid && next.payload.plan === now.payload.plan;
+  if (currentExp !== null && nextExp !== null && nextExp < currentExp && !sameLicence) {
     return {
       ok: false,
       error: `Your current licence lasts longer (until ${day(currentExp)}), so it stays active.`,
+      shorter: true,
     };
   }
   return { ok: true, payload: next.payload };
 }
 
+/** True for a yearly licence in its last 14 days. Never after it expired: then only a click refreshes. */
 export function refreshDue(pro: ProStatus, now: number): boolean {
   return (
     pro.plan === 'pro_yearly' &&
     pro.licenseExpiresAt !== null &&
+    pro.licenseExpiresAt > now &&
     pro.licenseExpiresAt - now < REFRESH_WINDOW_MS
   );
 }
@@ -85,7 +97,10 @@ export type RefreshResult =
   | { ok: true; key: string }
   | { ok: false; code: 'subscription_inactive' | 'network'; error: string };
 
-/** POST {apiBase}/api/license/refresh. The only network request Headerbench makes. */
+/**
+ * POST {apiBase}/api/license/refresh with only the key. The only network request Headerbench
+ * makes: on a Refresh click, or automatically for a yearly licence in its last 14 days.
+ */
 export async function requestRefresh(
   fetchFn: typeof fetch,
   apiBase: string,

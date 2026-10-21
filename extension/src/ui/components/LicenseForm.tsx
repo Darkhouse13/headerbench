@@ -2,12 +2,12 @@ import { RefreshCw } from 'lucide-preact';
 import { useState } from 'preact/hooks';
 import { Banner, Button } from './controls';
 import { useSnapshot, useStore } from '../context';
-import { formatDate } from '../format';
+import { formatAgo, formatDate } from '../format';
 
 /** Paste a licence key, see what it unlocks, and refresh a yearly key. */
 export function LicenseForm({ id }: { id: string }) {
   const store = useStore();
-  const { pro, state } = useSnapshot();
+  const { pro, state, licenseRefreshError } = useSnapshot();
   const [key, setKey] = useState('');
   const [message, setMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,6 +65,12 @@ export function LicenseForm({ id }: { id: string }) {
           )}
         </div>
       )}
+      {hasKey && licenseRefreshError && (
+        <Banner tone="warning" title="The automatic licence refresh failed">
+          {licenseRefreshError.message} Last try{' '}
+          {formatAgo(licenseRefreshError.at, store.platform.now())}.
+        </Banner>
+      )}
       <div class="field">
         <label class="field__label" for={id}>
           {hasKey ? 'Replace licence key' : 'Licence key'}
@@ -80,7 +86,8 @@ export function LicenseForm({ id }: { id: string }) {
         />
         <span class="field__help" id={`${id}-help`}>
           Paste the key from your activation page or receipt email. It starts with HB1. and is
-          checked on this device; nothing is sent anywhere.
+          checked on this device. To renew a yearly key, Headerbench sends only the key to
+          headerbench.com, in the 14 days before it ends or when you click Refresh.
         </span>
       </div>
       <div>

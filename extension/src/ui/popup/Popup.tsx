@@ -1,14 +1,15 @@
 import type { Profile } from '@headerbench/core';
-import { activeActivations, newProfile, originsFor, pageOrigin } from '@headerbench/core';
+import { activeActivations, newProfile, pageOrigin } from '@headerbench/core';
 import { Layers, PanelsTopLeft, Plus, Upload } from 'lucide-preact';
 import { useEffect, useState } from 'preact/hooks';
-import { pageHost, useAccess } from '../access';
+import { needsPageAccess, pageHost, useAccess } from '../access';
 import { useActivation } from '../activation';
 import { Banner, Button, EmptyState, IconButton, Switch } from '../components/controls';
 import { Logo } from '../components/Logo';
 import { Toasts } from '../components/Toasts';
 import { useSnapshot, useStore } from '../context';
 import type { ActiveTab } from '../platform';
+import { proNotice } from '../pro';
 import { AppliedOnTab } from './AppliedOnTab';
 import { PopupFooter } from './PopupFooter';
 import { PopupProfileRow } from './PopupProfileRow';
@@ -39,9 +40,10 @@ export function Popup() {
       return (
         profile !== undefined &&
         (a.tabId === null || a.tabId === tab.id) &&
-        originsFor(profile).length > 0
+        needsPageAccess(profile)
       );
     });
+  const notice = proNotice(snapshot.pro, state, platform.now());
 
   useEffect(() => {
     platform.activeTab().then(setTab, () => setTab(null));
@@ -69,8 +71,8 @@ export function Popup() {
         </span>
         <Switch
           checked={!paused}
-          label={paused ? 'Resume all profiles' : 'Pause all profiles'}
-          onChange={(on) => void store.call({ type: 'setPaused', paused: !on })}
+          label="Rules"
+          onChange={(on) => void store.run({ type: 'setPaused', paused: !on })}
         />
         <IconButton icon={PanelsTopLeft} label="Open editor" onClick={() => open('app.html')} />
       </header>
@@ -81,12 +83,26 @@ export function Popup() {
             <Banner
               tone="warning"
               actions={
-                <Button small onClick={() => void store.call({ type: 'setPaused', paused: false })}>
+                <Button small onClick={() => void store.run({ type: 'setPaused', paused: false })}>
                   Resume
                 </Button>
               }
             >
               All profiles are paused. Requests are not being changed.
+            </Banner>
+          </div>
+        )}
+        {notice && (
+          <div class="popup__notice">
+            <Banner
+              tone={notice.tone}
+              actions={
+                <Button small onClick={() => open('app.html#/pro')}>
+                  Open Pro
+                </Button>
+              }
+            >
+              {notice.text}
             </Banner>
           </div>
         )}
@@ -131,11 +147,9 @@ export function Popup() {
                 <PopupProfileRow
                   key={profile.id}
                   profile={profile}
-                  activation={
-                    state.settings.activations.find((a) => a.profileId === profile.id) ?? null
-                  }
+                  activations={state.settings.activations.filter((a) => a.profileId === profile.id)}
                   access={access.get(profile.id) ?? null}
-                  pageLabel={pageLabel}
+                  pageLabel={needsPageAccess(profile) ? pageLabel : null}
                   tabId={tab?.id ?? null}
                   controls={activation}
                   onGrant={() => grant(profile)}

@@ -1,13 +1,16 @@
 /**
  * The service worker's logic, built on an injected `chrome` so tests can drive it with a fake.
  * All state changes go through `mutate`, which runs serially: load → change → validate and save
- * (with backup) → recompile and replace DNR rules → badge → wake-up alarm → sync mirror.
+ * (with backup) → recompile and replace DNR rules → badge → wake-up alarm → sync bookkeeping and
+ * a debounced sync push. Sync never replaces state wholesale: pushes and remote changes both go
+ * through `mergeRemote` (see sync.ts).
  */
 import type { ImportReportLine, ProStatus, State, Warning } from '@headerbench/core';
 import {
   compile,
   hostAccessFrom,
   importAny,
+  needsInitiatorAccess,
   pageOrigin,
   newId,
   proStatus,
@@ -28,6 +31,7 @@ import type {
   ErrorCode,
   ExternalReply,
   LicenseOutcome,
+  LicenseRefreshError,
   Reply,
   Request,
   RequestOf,
@@ -49,18 +53,21 @@ import {
 } from './license';
 import { appliedEffects } from './matches';
 import { installRules } from './rules';
+import type { SplitRule } from './rules';
 import type { Loaded } from './store';
 import { KEYS, StateError, StateStore } from './store';
 import {
   SYNC_KEYS,
-  applyRemote,
   decodePayload,
   encodePayload,
-  mergeOnEnable,
+  mergeRemote,
+  payloadFingerprint,
+  recordLocalChanges,
+  reviveProfiles,
   staleChunkKeys,
   syncTooLargeMessage,
 } from './sync';
-import type { SyncMeta } from './sync';
+import type { LocalSyncMeta, SyncMeta, SyncPayload, Tombstones } from './sync';
 import { stateProblem } from './validate-state';
 
 export interface BackgroundConfig {
@@ -86,16 +93,31 @@ export interface Env {
 
 /** One alarm covers auto-pause times and Pro trial/licence expiry. */
 export const WAKE_ALARM = 'headerbench-wake';
+/** Every 6 hours: refreshes a yearly licence in its last 14 days (no request otherwise). */
+export const LICENSE_ALARM = 'headerbench-license';
+export const LICENSE_ALARM_PERIOD_MINUTES = AUTO_REFRESH_INTERVAL_MS / 60_000;
+
+/** storage.local keys outside State. Pages watch some of them (see extension/README.md). */
 export const LOCAL_KEYS = {
   runtime: 'runtime',
   syncStatus: 'syncStatus',
   deviceId: 'deviceId',
   refreshAttempt: 'licenseRefreshAttemptAt',
+  /** The last automatic licence refresh failure (`LicenseRefreshError`), cleared on success. */
+  refreshError: 'licenseRefreshError',
+  /** Profile id → deletion time, for sync (`Tombstones`). */
+  tombstones: 'syncTombstones',
+  /** When the variable list last changed on this device, for sync. */
+  variablesUpdatedAt: 'syncVariablesUpdatedAt',
+  /** When profiles were last reordered (here or on a device this one merged with), for sync. */
+  orderUpdatedAt: 'syncOrderUpdatedAt',
 } as const;
 
 interface RuntimeStatus {
   ruleError: string | null;
   rejected: Warning[];
+  /** Header rules installed split by header name, so matched rule ids can be explained. */
+  split: SplitRule[];
 }
 
 interface StoredSyncStatus {
@@ -121,6 +143,8 @@ function reportError(error: unknown): void {
 
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const isTime = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 function httpUrl(text: string): URL | null {
   try {
@@ -171,6 +195,16 @@ export function createBackground(env: Env) {
     }
   }
 
+  async function readRuntime(): Promise<RuntimeStatus> {
+    const stored = (await c.storage.local.get(LOCAL_KEYS.runtime))[LOCAL_KEYS.runtime] as
+      Partial<RuntimeStatus> | undefined;
+    return {
+      ruleError: stored?.ruleError ?? null,
+      rejected: stored?.rejected ?? [],
+      split: stored?.split ?? [],
+    };
+  }
+
   async function armWake(state: State, status: ProStatus, now: number): Promise<void> {
     const times = [
       nextPauseAt(state, now),
@@ -188,10 +222,14 @@ export function createBackground(env: Env) {
     let runtime: RuntimeStatus;
     if (!result.ok) {
       const budget = result.warnings.find((w) => w.code === 'RULE_BUDGET');
-      runtime = { ruleError: budget?.message ?? 'Rules could not be compiled.', rejected: [] };
+      runtime = {
+        ruleError: budget?.message ?? 'Rules could not be compiled.',
+        rejected: [],
+        split: [],
+      };
     } else {
       const outcome = await installRules(c.declarativeNetRequest, result);
-      runtime = { ruleError: outcome.error, rejected: outcome.rejected };
+      runtime = { ruleError: outcome.error, rejected: outcome.rejected, split: outcome.split };
     }
     await writeRuntime(runtime);
     try {
@@ -211,22 +249,20 @@ export function createBackground(env: Env) {
   type Mutation = (state: State, rev: number) => State | Promise<State>;
 
   /** `keepRev`: see StateStore.save. */
-  function mutate(
-    fn: Mutation,
-    options: { fromSync?: boolean; keepRev?: boolean } = {},
-  ): Promise<Loaded> {
+  function mutate(fn: Mutation, options: { keepRev?: boolean } = {}): Promise<Loaded> {
     return serial(async () => {
       const loaded = await store.load();
-      const next = await fn(loaded.state, loaded.rev);
-      if (JSON.stringify(next) === JSON.stringify(loaded.state)) return loaded;
+      const changed = await fn(loaded.state, loaded.rev);
+      if (JSON.stringify(changed) === JSON.stringify(loaded.state)) return loaded;
+      const next = await revive(loaded.state, changed);
       const saved = await store.save(next, { keepRev: options.keepRev === true });
       await resyncNow(saved.state);
-      if (!options.fromSync) await afterSave(loaded.state, saved.state);
+      await afterSave(loaded.state, saved.state);
       return saved;
     });
   }
 
-  // ---------- sync mirror ----------
+  // ---------- sync ----------
 
   async function deviceId(): Promise<string> {
     const stored = await c.storage.local.get(LOCAL_KEYS.deviceId);
@@ -249,11 +285,80 @@ export function createBackground(env: Env) {
 
   const syncActive = (state: State): boolean => state.settings.sync && pro(state).pro;
 
-  async function pushNow(): Promise<void> {
-    const { state } = await store.load();
-    if (!syncActive(state)) return;
+  async function readLocalSync(): Promise<LocalSyncMeta> {
+    const stored = await c.storage.local.get([
+      LOCAL_KEYS.tombstones,
+      LOCAL_KEYS.variablesUpdatedAt,
+      LOCAL_KEYS.orderUpdatedAt,
+    ]);
+    const raw = stored[LOCAL_KEYS.tombstones];
+    const tombstones: Tombstones =
+      typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+        ? Object.fromEntries(
+            Object.entries(raw as Record<string, unknown>).filter(
+              (entry): entry is [string, number] => isTime(entry[1]),
+            ),
+          )
+        : {};
+    const at = stored[LOCAL_KEYS.variablesUpdatedAt];
+    const orderAt = stored[LOCAL_KEYS.orderUpdatedAt];
+    return {
+      tombstones,
+      variablesUpdatedAt: isTime(at) ? at : 0,
+      orderUpdatedAt: isTime(orderAt) ? orderAt : 0,
+    };
+  }
+
+  async function writeLocalSync(before: LocalSyncMeta, after: LocalSyncMeta): Promise<void> {
+    if (JSON.stringify(before) === JSON.stringify(after)) return;
+    await c.storage.local.set({
+      [LOCAL_KEYS.tombstones]: after.tombstones,
+      [LOCAL_KEYS.variablesUpdatedAt]: after.variablesUpdatedAt,
+      [LOCAL_KEYS.orderUpdatedAt]: after.orderUpdatedAt,
+    });
+  }
+
+  /** A profile added back after a local delete outranks its tombstone (see reviveProfiles). */
+  async function revive(prev: State, next: State): Promise<State> {
+    const before = new Set(prev.profiles.map((p) => p.id));
+    if (next.profiles.every((p) => before.has(p.id))) return next;
+    return reviveProfiles(prev, next, (await readLocalSync()).tombstones, env.now());
+  }
+
+  /**
+   * Reads the mirror and merges it into local state (run inside `serial`). Saves the merged
+   * state when it differs and returns what this device should mirror, and whether the mirror
+   * lacks any of it.
+   */
+  async function mergeWithMirror(
+    order: 'local' | 'remote',
+  ): Promise<{ payload: SyncPayload; mirrorStale: boolean }> {
     const now = env.now();
-    const payload = { profiles: state.profiles, variables: state.settings.variables };
+    const { state } = await store.load();
+    const decoded = decodePayload(await c.storage.sync.get(null), now);
+    const localMeta = await readLocalSync();
+    const merged = mergeRemote(state, localMeta, decoded?.payload ?? null, { order, now });
+    const next = sortActivations(merged.state);
+    if (JSON.stringify(next) !== JSON.stringify(state)) {
+      const saved = await store.save(next);
+      await resyncNow(saved.state);
+    }
+    await writeLocalSync(localMeta, merged.meta);
+    const mirrorStale =
+      decoded === null ||
+      payloadFingerprint(decoded.payload) !== payloadFingerprint(merged.payload);
+    return { payload: merged.payload, mirrorStale };
+  }
+
+  /** Merges with the mirror, then writes the merged result to it when that changes anything. */
+  async function pushNow(): Promise<void> {
+    if (!syncActive((await store.load()).state)) return;
+    const now = env.now();
+    const { payload, mirrorStale } = await mergeWithMirror('local');
+    if (!mirrorStale) {
+      await writeSyncStatus({ error: null, lastSyncedAt: now });
+      return;
+    }
     const encoded = encodePayload(payload, await deviceId(), now);
     if (!encoded.ok) {
       await writeSyncStatus({ error: syncTooLargeMessage(encoded.bytes), bytes: encoded.bytes });
@@ -289,33 +394,140 @@ export function createBackground(env: Env) {
   }
 
   async function afterSave(prev: State, next: State): Promise<void> {
+    const before = await readLocalSync();
+    await writeLocalSync(before, recordLocalChanges(prev, next, before, env.now()));
     if (!syncActive(next)) return;
-    if (!prev.settings.sync) {
-      const decoded = decodePayload(await c.storage.sync.get(null), env.now());
-      if (decoded && decoded.meta.device !== (await deviceId())) {
-        const merged = sortActivations(mergeOnEnable(next, decoded.payload));
-        if (JSON.stringify(merged) !== JSON.stringify(next)) {
-          const saved = await store.save(merged);
-          await resyncNow(saved.state);
-        }
-      }
-    }
+    // Sync just became active (toggle, licence, trial): take in what other devices mirrored
+    // before this device writes anything.
+    if (!syncActive(prev)) await mergeWithMirror('local');
     schedulePush();
   }
 
+  /** Merges what another device mirrored; pushes back only when that device lacks something. */
   async function onSyncChanged(changes: Record<string, chrome.storage.StorageChange>) {
-    const meta = changes[SYNC_KEYS.meta]?.newValue as SyncMeta | undefined;
-    if (!meta || meta.device === (await deviceId())) return;
-    await mutate(
-      async (state) => {
-        if (!syncActive(state)) return state;
-        const decoded = decodePayload(await c.storage.sync.get(null), env.now());
-        if (!decoded) return state;
-        await writeSyncStatus({ error: null, lastSyncedAt: env.now() });
-        return applyRemote(state, decoded.payload);
-      },
-      { fromSync: true },
+    if (!Object.keys(changes).some((key) => key.startsWith(SYNC_KEYS.chunkPrefix))) return;
+    const own = await deviceId();
+    const pushBack = await serial(async () => {
+      if (!syncActive((await store.load()).state)) return false;
+      const meta = (await c.storage.sync.get(SYNC_KEYS.meta))[SYNC_KEYS.meta] as
+        SyncMeta | undefined;
+      if (!meta || meta.device === own) return false;
+      const { mirrorStale } = await mergeWithMirror('remote');
+      await writeSyncStatus({ error: null, lastSyncedAt: env.now() });
+      return mirrorStale;
+    });
+    if (pushBack) schedulePush();
+  }
+
+  /** On browser start: catch up with what other devices mirrored while this one was closed. */
+  async function pullFromMirror(): Promise<void> {
+    const pushBack = await serial(async () => {
+      if (!syncActive((await store.load()).state)) return false;
+      return (await mergeWithMirror('remote')).mirrorStale;
+    });
+    if (pushBack) schedulePush();
+  }
+
+  // ---------- licence refresh ----------
+
+  async function readRefreshError(): Promise<LicenseRefreshError | null> {
+    const raw = (await c.storage.local.get(LOCAL_KEYS.refreshError))[LOCAL_KEYS.refreshError] as
+      LicenseRefreshError | undefined;
+    return raw ?? null;
+  }
+
+  async function clearRefreshError(): Promise<void> {
+    if (await readRefreshError()) await c.storage.local.remove(LOCAL_KEYS.refreshError);
+  }
+
+  /** `keepRev` for saves the user didn't make, so an open editor can still save its own. */
+  const setLicense = async (key: string, options: { keepRev?: boolean } = {}): Promise<Loaded> => {
+    const saved = await mutate(
+      (s) => ({ ...s, settings: { ...s.settings, licenseKey: key } }),
+      options,
     );
+    await clearRefreshError();
+    return saved;
+  };
+
+  /** Same licence, plan and expiry: the keys differ at most by when they were signed (`iat`). */
+  function sameTerms(a: string, b: string): boolean {
+    const x = verify(a);
+    const y = verify(b);
+    if (!x.ok || !y.ok) return false;
+    const p = x.payload;
+    const q = y.payload;
+    return p.lid === q.lid && p.plan === q.plan && p.exp === q.exp;
+  }
+
+  /**
+   * The refresh request itself. Throws HandlerError on failure; the stored key is kept.
+   * `auto`: a background or editor-mount refresh, which saves without bumping rev.
+   */
+  async function refreshKey(key: string, auto: boolean): Promise<LicenseOutcome> {
+    await c.storage.local.set({ [LOCAL_KEYS.refreshAttempt]: env.now() });
+    const result = await requestRefresh(env.fetch, cfg.apiBase, key);
+    if (!result.ok) throw new HandlerError(result.code, result.error);
+    // Near the period end the server re-signs the same expiry; storing it would change nothing.
+    if (sameTerms(result.key, key)) {
+      await clearRefreshError();
+      return licenseOutcome(key, false);
+    }
+    const check = await replacementCheck(result.key);
+    if (check.ok) {
+      await setLicense(result.key, { keepRev: auto });
+      return licenseOutcome(result.key, false);
+    }
+    if (check.shorter) {
+      // The server sent a different licence that ends sooner (a same-licence key is accepted
+      // above); the stored one stays and the subscription is evidently fine.
+      await clearRefreshError();
+      return licenseOutcome(key, false);
+    }
+    throw new HandlerError(
+      'license_invalid',
+      `The licence server sent a key this version cannot use. ${check.error} Your current licence stays active.`,
+    );
+  }
+
+  /**
+   * Refreshes a yearly licence in its last 14 days, at most every 6 hours. Returns null when
+   * nothing was due (no request made). A failure is stored for Settings and rethrown.
+   */
+  async function autoRefresh(): Promise<LicenseOutcome | null> {
+    const key = await serial(async () => {
+      const { state } = await store.load();
+      const now = env.now();
+      const last = (await c.storage.local.get(LOCAL_KEYS.refreshAttempt))[
+        LOCAL_KEYS.refreshAttempt
+      ];
+      const recent = isTime(last) && now - last < AUTO_REFRESH_INTERVAL_MS;
+      if (!state.settings.licenseKey || !refreshDue(pro(state), now) || recent) return null;
+      // Claimed inside the queue, so concurrent triggers make one request.
+      await c.storage.local.set({ [LOCAL_KEYS.refreshAttempt]: now });
+      return state.settings.licenseKey;
+    });
+    if (key === null) return null;
+    try {
+      return await refreshKey(key, true);
+    } catch (error) {
+      const stored: LicenseRefreshError = {
+        at: env.now(),
+        code: error instanceof HandlerError ? error.code : 'internal',
+        message: errorText(error),
+      };
+      await c.storage.local.set({ [LOCAL_KEYS.refreshError]: stored });
+      throw error;
+    }
+  }
+
+  /** Background trigger (alarm, startup, install): failures stay silent, stored for Settings. */
+  async function refreshInBackground(): Promise<void> {
+    try {
+      await autoRefresh();
+    } catch (error) {
+      if (!(error instanceof HandlerError)) reportError(error);
+    }
   }
 
   // ---------- snapshot ----------
@@ -325,15 +537,8 @@ export function createBackground(env: Env) {
     const now = env.now();
     const status = pro(state);
     const compiled = compile(state, { pro: status.pro, now });
-    const stored = await c.storage.local.get([
-      LOCAL_KEYS.runtime,
-      LOCAL_KEYS.syncStatus,
-      KEYS.corrupt,
-    ]);
-    const runtime = (stored[LOCAL_KEYS.runtime] as RuntimeStatus | undefined) ?? {
-      ruleError: null,
-      rejected: [],
-    };
+    const stored = await c.storage.local.get([LOCAL_KEYS.syncStatus, KEYS.corrupt]);
+    const runtime = await readRuntime();
     const sync = stored[LOCAL_KEYS.syncStatus] as StoredSyncStatus | undefined;
     return {
       rev,
@@ -351,6 +556,7 @@ export function createBackground(env: Env) {
         bytes: sync?.bytes ?? 0,
         lastSyncedAt: sync?.lastSyncedAt ?? null,
       },
+      licenseRefreshError: await readRefreshError(),
       hasCorruptData: stored[KEYS.corrupt] !== undefined,
       version: cfg.version,
     };
@@ -393,7 +599,11 @@ export function createBackground(env: Env) {
       origin: parsed.origin,
       hasHostAccess: granted(parsed.href),
       pageOrigin: page,
-      hasPageAccess: page === null || granted(req.initiator as string),
+      // Chrome applies rules to page loads (main_frame, sub_frame) without initiator access.
+      hasPageAccess:
+        page === null ||
+        !needsInitiatorAccess(req.resourceType) ||
+        granted(req.initiator as string),
     };
   }
 
@@ -409,9 +619,6 @@ export function createBackground(env: Env) {
       skipped,
     };
   }
-
-  const setLicense = (key: string): Promise<Loaded> =>
-    mutate((s) => ({ ...s, settings: { ...s.settings, licenseKey: key } }));
 
   const handlers: { [K in RequestType]: (req: RequestOf<K>) => Promise<ResponseMap[K]> } = {
     async getState() {
@@ -439,7 +646,8 @@ export function createBackground(env: Env) {
           review: prev.settings.review,
         };
         const next = { ...req.state, settings };
-        if (addsProItem(prev, next) && pro(prev).source !== 'license') {
+        // Anyone who ever had a licence (even an expired one) has had their trial's worth.
+        if (addsProItem(prev, next) && pro(prev).plan === null) {
           settings = startTrialIfNeeded(settings, env.now());
         }
         return sortActivations({ ...next, settings });
@@ -473,7 +681,20 @@ export function createBackground(env: Env) {
         return { unavailable: true, reason, explain };
       }
       const compiled = compile(state, { pro: pro(state).pro, now });
-      return { unavailable: false, applied: appliedEffects(state, compiled, matched), explain };
+      const { split } = await readRuntime();
+      const installed = {
+        ...compiled,
+        dynamic: [
+          ...compiled.dynamic,
+          ...split.filter((s) => s.source.list === 'dynamic').map((s) => s.rule),
+        ],
+        session: [
+          ...compiled.session,
+          ...split.filter((s) => s.source.list === 'session').map((s) => s.rule),
+        ],
+        sources: [...compiled.sources, ...split.map((s) => s.source)],
+      };
+      return { unavailable: false, applied: appliedEffects(state, installed, matched), explain };
     },
 
     async importText(req) {
@@ -528,7 +749,7 @@ export function createBackground(env: Env) {
     },
 
     async deactivate(req) {
-      await mutate((s) => deactivate(s, req.profileId));
+      await mutate((s) => deactivate(s, req.profileId, req.tabId));
       return snapshot();
     },
 
@@ -552,34 +773,14 @@ export function createBackground(env: Env) {
       if (!key || status.plan === null) {
         throw new HandlerError('license_invalid', 'There is no licence key to refresh yet.');
       }
-      const now = env.now();
       if (status.plan === 'pro_lifetime') return licenseOutcome(key, true);
-      if (req.auto) {
-        const last = (await c.storage.local.get(LOCAL_KEYS.refreshAttempt))[
-          LOCAL_KEYS.refreshAttempt
-        ];
-        const recent = typeof last === 'number' && now - last < AUTO_REFRESH_INTERVAL_MS;
-        if (!refreshDue(status, now) || recent) return licenseOutcome(key, true);
-      }
-      await c.storage.local.set({ [LOCAL_KEYS.refreshAttempt]: now });
-      const result = await requestRefresh(env.fetch, cfg.apiBase, key);
-      if (!result.ok) throw new HandlerError(result.code, result.error);
-      const check = await replacementCheck(result.key);
-      if (!check.ok) {
-        throw new HandlerError(
-          'license_invalid',
-          `The licence server sent a key this version cannot use. ${check.error} Your current licence stays active.`,
-        );
-      }
-      await setLicense(result.key);
-      return licenseOutcome(result.key, false);
+      if (req.auto) return (await autoRefresh()) ?? licenseOutcome(key, true);
+      return refreshKey(key, false);
     },
 
     async startTrial() {
       await mutate((s) =>
-        pro(s).source === 'license'
-          ? s
-          : { ...s, settings: startTrialIfNeeded(s.settings, env.now()) },
+        pro(s).plan !== null ? s : { ...s, settings: startTrialIfNeeded(s.settings, env.now()) },
       );
       return snapshot();
     },
@@ -636,7 +837,11 @@ export function createBackground(env: Env) {
         };
       }
       if (error instanceof StateError) {
-        return { ok: false, code: 'invalid_state', error: error.message };
+        return {
+          ok: false,
+          code: error.reason === 'storage_full' ? 'storage_full' : 'invalid_state',
+          error: error.message,
+        };
       }
       reportError(error);
       return {
@@ -685,20 +890,44 @@ export function createBackground(env: Env) {
 
   // ---------- lifecycle ----------
 
+  /**
+   * Creates the 6-hourly licence alarm unless it already runs with that period. Chrome may drop
+   * alarms across updates and when the extension is disabled and enabled again (which fires
+   * neither onInstalled nor onStartup), so this also runs whenever the service worker starts.
+   * An existing alarm is kept, so frequent restarts don't keep pushing it back.
+   */
+  async function armLicenseAlarm(): Promise<void> {
+    const existing = await c.alarms.get(LICENSE_ALARM);
+    if (existing?.periodInMinutes === LICENSE_ALARM_PERIOD_MINUTES) return;
+    await c.alarms.create(LICENSE_ALARM, {
+      delayInMinutes: LICENSE_ALARM_PERIOD_MINUTES,
+      periodInMinutes: LICENSE_ALARM_PERIOD_MINUTES,
+    });
+  }
+
   async function onInstalled(details: { reason: string }): Promise<void> {
     await serial(() => store.load());
     if (details.reason === 'install') {
       await c.tabs.create({ url: c.runtime.getURL('welcome.html') });
     }
     await resync();
+    await armLicenseAlarm();
+    await refreshInBackground();
   }
 
   async function onStartup(): Promise<void> {
     await mutate((s) => dropExpired(dropTabActivations(s), env.now()));
     await resync();
+    await armLicenseAlarm();
+    await pullFromMirror();
+    await refreshInBackground();
   }
 
   async function onAlarm(alarm: { name: string }): Promise<void> {
+    if (alarm.name === LICENSE_ALARM) {
+      await refreshInBackground();
+      return;
+    }
     if (alarm.name !== WAKE_ALARM) return;
     await mutate((s) => dropExpired(s, env.now()));
     await resync();
@@ -736,12 +965,17 @@ export function createBackground(env: Env) {
       void handleExternal(message, sender).then(sendResponse);
       return true;
     });
+    armLicenseAlarm().catch(reportError);
   }
 
   /** Resolves once queued work and any scheduled sync push have finished (tests). */
   async function idle(): Promise<void> {
-    await syncDone?.promise;
-    await queue;
+    for (;;) {
+      const pending = syncDone?.promise;
+      await pending;
+      await queue;
+      if (syncDone?.promise === pending && syncTimer === null) return;
+    }
   }
 
   return {

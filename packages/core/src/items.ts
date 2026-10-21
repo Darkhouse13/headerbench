@@ -4,6 +4,7 @@
  * disabled) and by the UI (inline errors). Variables are not substituted here.
  */
 import type { BlockRule, HeaderMod, MockRule, Profile, RedirectRule, UrlFilter } from './model.js';
+import { checkRegex, checkRegexSubstitution, toRegexSubstitution } from './re2.js';
 import { matchesUrlFilter } from './urlfilter.js';
 import {
   checkContentType,
@@ -11,7 +12,6 @@ import {
   checkExactUrl,
   checkHeaderName,
   checkHeaderValue,
-  checkRegex,
   checkTargetUrl,
   checkUrlFilter,
 } from './validate.js';
@@ -46,13 +46,18 @@ export function checkRedirect(rule: RedirectRule): string | null {
   const from = rule.kind === 'url' ? checkExactUrl(rule.from) : checkPattern(rule.kind, rule.from);
   if (from) return from;
   if (rule.to.trim().length === 0) return 'The redirect target is empty.';
-  if (rule.kind === 'regex' || usesVariables(rule.to)) return null;
+  if (rule.kind !== 'regex' && usesVariables(rule.to)) return null;
   return checkRedirectTarget(rule, rule.to);
 }
 
-/** Checks a resolved redirect target, including the "redirects to itself" loop. */
+/**
+ * Checks a resolved redirect target: for regex redirects, that every `$N` names a capture group;
+ * otherwise a valid URL that does not redirect to itself.
+ */
 export function checkRedirectTarget(rule: RedirectRule, target: string): string | null {
-  if (rule.kind === 'regex') return null;
+  if (rule.kind === 'regex') {
+    return checkRegexSubstitution(rule.from, toRegexSubstitution(target));
+  }
   const invalid = checkTargetUrl(target);
   if (invalid) return invalid;
   const loops =

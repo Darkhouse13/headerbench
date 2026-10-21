@@ -4,6 +4,17 @@ import { Check, Copy, Download, Pipette, Trash2 } from 'lucide-preact';
 import { Button, Field, Segmented } from '../components/controls';
 import { ENV_LABELS } from '../format';
 
+/** Names for PROFILE_COLORS, for screen readers. */
+const COLOR_NAMES: Record<string, string> = {
+  '#1a73e8': 'Blue',
+  '#188038': 'Green',
+  '#c5221f': 'Red',
+  '#b06000': 'Orange',
+  '#8430ce': 'Purple',
+  '#007b83': 'Teal',
+  '#5f6368': 'Grey',
+};
+
 interface Props {
   profile: Profile;
   onChange: (patch: Partial<Profile>) => void;
@@ -50,7 +61,7 @@ export function ProfileSettings({ profile, onChange, onDuplicate, onExport, onDe
                 type="button"
                 role="radio"
                 aria-checked={profile.color === c}
-                aria-label={c}
+                aria-label={COLOR_NAMES[c] ?? c}
                 class="swatch"
                 style={{ background: c }}
                 onClick={() => onChange({ color: c })}

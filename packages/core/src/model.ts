@@ -58,6 +58,9 @@ export const RESOURCE_TYPES: readonly ResourceType[] = [
   'webbundle',
   'other',
 ];
+/** Page and frame loads. Chrome applies their rules without access to the initiator page. */
+export const FRAME_TYPES: readonly ResourceType[] = ['main_frame', 'sub_frame'];
+
 export const METHODS: readonly Method[] = [
   'get',
   'post',

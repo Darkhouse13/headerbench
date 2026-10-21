@@ -4,8 +4,8 @@ import { Filter, Plus, Trash2 } from 'lucide-preact';
 import { Button, EmptyState, IconButton, Issue, Segmented, Switch } from '../components/controls';
 import { useStore } from '../context';
 import { FILTER_KIND_LABELS, METHOD_LABELS, RESOURCE_TYPE_LABELS } from '../format';
-import type { IssueMap } from './issues';
-import { Cell, RuleRow, RuleTable, onEnter, shown, useFocusRow } from './table';
+import type { IssueMap, RowIssue } from './issues';
+import { Cell, RuleRow, RuleTable, onEnter, memoRow, shown, useFocusRow, useStable } from './table';
 import { useRegexCheck } from './useRegexCheck';
 
 const TEMPLATE = '44px 112px 132px minmax(240px, 1fr) 36px';
@@ -51,19 +51,98 @@ function FilterValue({
   );
 }
 
+interface FilterRowProps {
+  filter: UrlFilter;
+  index: number;
+  issues: readonly RowIssue[] | undefined;
+  setRow: (id: string, patch: Partial<UrlFilter>) => void;
+  addAfter: (index: number, exclude?: boolean) => void;
+  remove: (id: string) => void;
+}
+
+const FilterRow = memoRow(function FilterRow({
+  filter: f,
+  index: i,
+  issues,
+  setRow,
+  addAfter,
+  remove,
+}: FilterRowProps) {
+  return (
+    <RuleRow id={f.id} enabled={f.enabled} issues={shown(issues, f.value === '')}>
+      <Cell>
+        <Switch
+          small
+          checked={f.enabled}
+          label={f.value.trim() || 'Unnamed filter'}
+          onChange={(enabled) => setRow(f.id, { enabled })}
+        />
+      </Cell>
+      <Cell>
+        <select
+          class="select select--dense"
+          aria-label="Mode"
+          value={f.exclude ? 'exclude' : 'include'}
+          onChange={(e) => setRow(f.id, { exclude: e.currentTarget.value === 'exclude' })}
+        >
+          <option value="include">Include</option>
+          <option value="exclude">Exclude</option>
+        </select>
+      </Cell>
+      <Cell>
+        <select
+          class="select select--dense"
+          aria-label="Filter type"
+          value={f.kind}
+          onChange={(e) => setRow(f.id, { kind: e.currentTarget.value as FilterKind })}
+        >
+          {(Object.keys(FILTER_KIND_LABELS) as FilterKind[]).map((k) => (
+            <option key={k} value={k}>
+              {FILTER_KIND_LABELS[k]}
+            </option>
+          ))}
+        </select>
+      </Cell>
+      <Cell>
+        <FilterValue
+          filter={f}
+          onInput={(value) => setRow(f.id, { value })}
+          onKeyDown={onEnter(() => addAfter(i, f.exclude))}
+        />
+      </Cell>
+      <Cell>
+        <IconButton
+          icon={Trash2}
+          small
+          label={`Delete filter ${f.value}`}
+          onClick={() => remove(f.id)}
+        />
+      </Cell>
+    </RuleRow>
+  );
+});
+
 export function FiltersTab({ profile, issues, onChange }: Props) {
   const focusRow = useFocusRow();
   const filters = profile.filters;
   const setFilters = (next: UrlFilter[]): void => onChange({ filters: next });
-  const setRow = (id: string, patch: Partial<UrlFilter>): void =>
-    setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
-  const addAfter = (index: number, exclude = false): void => {
-    const row: UrlFilter = { id: newId(), enabled: true, kind: 'domain', value: '', exclude };
+  const setRow = useStable((id: string, patch: Partial<UrlFilter>): void =>
+    setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f))),
+  );
+  const addAfter = useStable((index: number, exclude?: boolean): void => {
+    const row: UrlFilter = {
+      id: newId(),
+      enabled: true,
+      kind: 'domain',
+      value: '',
+      exclude: exclude ?? false,
+    };
     const next = [...filters];
     next.splice(index + 1, 0, row);
     setFilters(next);
     focusRow(row.id);
-  };
+  });
+  const remove = useStable((id: string): void => setFilters(filters.filter((x) => x.id !== id)));
   const includes = filters.filter((f) => f.enabled && !f.exclude);
   const kindsUsed = [...new Set(filters.map((f) => f.kind))];
 
@@ -112,63 +191,15 @@ export function FiltersTab({ profile, issues, onChange }: Props) {
               columns={['On', 'Mode', 'Type', 'Value', '']}
             >
               {filters.map((f, i) => (
-                <RuleRow
+                <FilterRow
                   key={f.id}
-                  id={f.id}
-                  enabled={f.enabled}
-                  issues={shown(issues.get(f.id), f.value === '')}
-                >
-                  <Cell>
-                    <Switch
-                      small
-                      checked={f.enabled}
-                      label={`${f.enabled ? 'Turn off' : 'Turn on'} filter ${f.value}`}
-                      onChange={(enabled) => setRow(f.id, { enabled })}
-                    />
-                  </Cell>
-                  <Cell>
-                    <select
-                      class="select select--dense"
-                      aria-label="Mode"
-                      value={f.exclude ? 'exclude' : 'include'}
-                      onChange={(e) =>
-                        setRow(f.id, { exclude: e.currentTarget.value === 'exclude' })
-                      }
-                    >
-                      <option value="include">Include</option>
-                      <option value="exclude">Exclude</option>
-                    </select>
-                  </Cell>
-                  <Cell>
-                    <select
-                      class="select select--dense"
-                      aria-label="Filter type"
-                      value={f.kind}
-                      onChange={(e) => setRow(f.id, { kind: e.currentTarget.value as FilterKind })}
-                    >
-                      {(Object.keys(FILTER_KIND_LABELS) as FilterKind[]).map((k) => (
-                        <option key={k} value={k}>
-                          {FILTER_KIND_LABELS[k]}
-                        </option>
-                      ))}
-                    </select>
-                  </Cell>
-                  <Cell>
-                    <FilterValue
-                      filter={f}
-                      onInput={(value) => setRow(f.id, { value })}
-                      onKeyDown={onEnter(() => addAfter(i, f.exclude))}
-                    />
-                  </Cell>
-                  <Cell>
-                    <IconButton
-                      icon={Trash2}
-                      small
-                      label={`Delete filter ${f.value}`}
-                      onClick={() => setFilters(filters.filter((x) => x.id !== f.id))}
-                    />
-                  </Cell>
-                </RuleRow>
+                  filter={f}
+                  index={i}
+                  issues={issues.get(f.id)}
+                  setRow={setRow}
+                  addAfter={addAfter}
+                  remove={remove}
+                />
               ))}
             </RuleTable>
             <div class="panel__actions">

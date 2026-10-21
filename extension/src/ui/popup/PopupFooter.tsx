@@ -15,7 +15,7 @@ export function PopupFooter({ onOpen }: { onOpen: (path: string) => void }) {
 
   useEffect(() => {
     if (showReview && reviewState === 'pending') {
-      void store.call({ type: 'setReviewState', state: 'shown' });
+      void store.run({ type: 'setReviewState', state: 'shown' });
     }
   }, [showReview, reviewState, store]);
 
@@ -33,7 +33,7 @@ export function PopupFooter({ onOpen }: { onOpen: (path: string) => void }) {
               variant="primary"
               onClick={() => {
                 void platform.openUrl(reviewUrl(platform.extensionId, platform.userAgent));
-                void store.call({ type: 'setReviewState', state: 'rated' });
+                void store.run({ type: 'setReviewState', state: 'rated' });
               }}
             >
               Rate
@@ -41,7 +41,7 @@ export function PopupFooter({ onOpen }: { onOpen: (path: string) => void }) {
             <Button
               small
               variant="text"
-              onClick={() => void store.call({ type: 'setReviewState', state: 'dismissed' })}
+              onClick={() => void store.run({ type: 'setReviewState', state: 'dismissed' })}
             >
               Not now
             </Button>
